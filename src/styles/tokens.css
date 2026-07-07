@@ -1,0 +1,87 @@
+/* Dreamscape design tokens — dark is the base theme.
+   Light is an override under [data-theme="light"].
+   Values mirror the studio design system (Asset Platform Design System v0.2). */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg: #0B0E15;
+  --surface-1: #141823;
+  --surface-2: #1C2230;
+  --surface-3: #232B3A;
+
+  /* borders */
+  --border: #262D3C;
+  --border-strong: #313A4D;
+
+  /* text */
+  --text: #F0F2F7;
+  --text-muted: #9AA3B5;
+  --text-faint: #646E82;
+
+  /* primary (cosmic blue) */
+  --primary: #3B82F6;
+  --primary-strong: #2F6FE0;
+  --primary-rgb: 59, 130, 246;
+  --primary-fg: #FFFFFF;
+
+  /* accents */
+  --accent: #8B7BF0;
+  --warm: #F2885E;
+
+  /* status */
+  --success: #5FCF8F;
+  --warning: #F2B45E;
+  --danger: #F2685E;
+  --info: #4C8DF6;
+
+  /* status tint backgrounds */
+  --bg-primary: rgba(59, 130, 246, 0.12);
+  --bg-success: rgba(95, 207, 143, 0.14);
+  --bg-warning: rgba(242, 180, 94, 0.14);
+  --bg-danger: rgba(242, 104, 94, 0.14);
+  --bg-info: rgba(76, 141, 246, 0.14);
+
+  /* misc */
+  --shadow: rgba(0, 0, 0, 0.45);
+  --radius: 10px;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #F1E9DF;
+  --surface-1: #FBF7F1;
+  --surface-2: #FFFFFF;
+  --surface-3: #F3ECE2;
+
+  --border: #E7DECF;
+  --border-strong: #D9CDBA;
+
+  --text: #2C2A2E;
+  --text-muted: #6F6A63;
+  --text-faint: #9A9389;
+
+  --primary: #5B86C9;
+  --primary-strong: #4A6FB0;
+  --primary-rgb: 91, 134, 201;
+  --primary-fg: #FFFFFF;
+
+  --accent: #8FA98C;
+  --warm: #E29A77;
+
+  --success: #7FB089;
+  --warning: #DDA85C;
+  --danger: #D67A6E;
+  --info: #5B86C9;
+
+  --bg-primary: rgba(91, 134, 201, 0.14);
+  --bg-success: rgba(127, 176, 137, 0.18);
+  --bg-warning: rgba(221, 168, 92, 0.18);
+  --bg-danger: rgba(214, 122, 110, 0.18);
+  --bg-info: rgba(91, 134, 201, 0.16);
+
+  --shadow: rgba(120, 100, 80, 0.12);
+  --radius: 10px;
+}

@@ -708,7 +708,7 @@ const FileExplorer = ({ onSelectionChange, onFileDoubleClick, fileMetadata, onFo
           searchMode === 'p4' && searchTerm.length >= 2 ? (
             p4Searching ? (
               <div className="empty-state">
-                <Loader size={32} className="spinning" color="#3D8B1F" />
+                <Loader size={32} className="spinning" color="var(--primary)" />
                 <p>Searching P4 workspace...</p>
               </div>
             ) : p4SearchResults.length > 0 ? (

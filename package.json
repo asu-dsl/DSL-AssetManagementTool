@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "electron:dev": "set NODE_ENV=development && electron .",
+    "electron:watch": "set NODE_ENV=development && electronmon .",
     "build": "vite build",
     "build:electron": "electron-builder --dir",
     "package": "electron-packager . AssetMetadataTool --platform=win32 --arch=x64 --out=dist-packaged --overwrite --asar --icon=public/icon.ico"
@@ -23,7 +24,14 @@
     "electron": "^28.0.0",
     "electron-builder": "^24.9.0",
     "electron-packager": "^17.1.2",
+    "electronmon": "^2.0.4",
     "vite": "^5.0.0"
+  },
+  "electronmon": {
+    "patterns": [
+      "electron/**/*"
+    ],
+    "logLevel": "quiet"
   },
   "build": {
     "appId": "com.assetmanagement.tool",

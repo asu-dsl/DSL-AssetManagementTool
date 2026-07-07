@@ -1,5 +1,7 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
+import os from 'os';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import fsSync from 'fs';
@@ -37,6 +39,7 @@ function createWindow() {
   }
 }
 
+console.log('[DSL main] ready — folder classify rule: sidecar/subdir=category/leaf=asset');
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
@@ -1188,32 +1191,121 @@ ipcMain.handle('p4-search-files', async (event, { pattern, client }) => {
   }
 });
 
-function getFavoritesFilePath() {
-  const userDataPath = app.getPath('userData');
-  return path.join(userDataPath, 'favorites.json');
+// ---------- Profiles (per-user, keyed on Perforce user, OS-user fallback) ----------
+
+function getProfilesDir() {
+  return path.join(app.getPath('userData'), 'profiles');
 }
 
-ipcMain.handle('favorites-load', async () => {
+function getActiveProfileKey() {
+  const p4User = (typeof p4Config !== 'undefined' && p4Config && p4Config.user) ? p4Config.user : null;
+  let osUser = 'default';
+  try { osUser = os.userInfo().username || 'default'; } catch {}
+  return String(p4User || osUser || 'default').replace(/[^\w.-]/g, '_');
+}
+
+function profileFilePath(key) {
+  return path.join(getProfilesDir(), `${key}.json`);
+}
+
+async function readProfile() {
+  const key = getActiveProfileKey();
+  await fs.mkdir(getProfilesDir(), { recursive: true });
   try {
-    const filePath = getFavoritesFilePath();
-    const data = await fs.readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(data);
-    return { success: true, favorites: Array.isArray(parsed) ? parsed : [] };
-  } catch (error) {
-    // File doesn't exist yet or corrupt — return empty
-    return { success: true, favorites: [] };
+    const data = await fs.readFile(profileFilePath(key), 'utf-8');
+    const p = JSON.parse(data);
+    return {
+      displayName: p.displayName || key,
+      favorites: Array.isArray(p.favorites) ? p.favorites : [],
+      connections: p.connections || {},
+      ...p,
+      key,
+    };
+  } catch {
+    let favorites = [];
+    try {
+      const legacy = await fs.readFile(path.join(app.getPath('userData'), 'favorites.json'), 'utf-8');
+      const parsed = JSON.parse(legacy);
+      if (Array.isArray(parsed)) favorites = parsed;
+    } catch {}
+    const profile = { key, displayName: key, favorites, connections: {}, createdAt: new Date().toISOString() };
+    try { await fs.writeFile(profileFilePath(key), JSON.stringify(profile, null, 2), 'utf-8'); } catch {}
+    return profile;
   }
+}
+
+async function writeProfile(partial) {
+  const key = (partial && partial.key) || getActiveProfileKey();
+  await fs.mkdir(getProfilesDir(), { recursive: true });
+  let existing = {};
+  try { existing = JSON.parse(await fs.readFile(profileFilePath(key), 'utf-8')); } catch {}
+  const merged = { ...existing, ...partial, key };
+  await fs.writeFile(profileFilePath(key), JSON.stringify(merged, null, 2), 'utf-8');
+  return merged;
+}
+
+ipcMain.handle('profile-load', async () => {
+  try { return { success: true, profile: await readProfile() }; }
+  catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('profile-save', async (event, profile) => {
+  try { return { success: true, profile: await writeProfile(profile) }; }
+  catch (error) { return { success: false, error: error.message }; }
+});
+
+ipcMain.handle('favorites-load', async () => {
+  try { const p = await readProfile(); return { success: true, favorites: p.favorites || [] }; }
+  catch { return { success: true, favorites: [] }; }
 });
 
 ipcMain.handle('favorites-save', async (event, favorites) => {
+  try { await writeProfile({ favorites: Array.isArray(favorites) ? favorites : [] }); return { success: true }; }
+  catch (error) { return { success: false, error: error.message }; }
+});
+
+// ---------- 2.0 library helpers ----------
+
+ipcMain.handle('list-folder-files', async (event, dirPath) => {
   try {
-    const filePath = getFavoritesFilePath();
-    await fs.writeFile(filePath, JSON.stringify(favorites, null, 2), 'utf-8');
-    return { success: true };
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    const items = [];
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      const full = path.join(dirPath, e.name);
+      try {
+        const stats = await fs.stat(full);
+        items.push({
+          name: e.name,
+          path: full,
+          isDirectory: e.isDirectory(),
+          size: stats.size,
+          lastModified: stats.mtime.toISOString(),
+        });
+      } catch {}
+    }
+    return { success: true, items };
   } catch (error) {
-    console.error('Failed to save favorites:', error);
+    return { success: false, error: error.message, items: [] };
+  }
+});
+
+ipcMain.handle('rename-file', async (event, { path: oldPath, newName }) => {
+  try {
+    const dir = path.dirname(oldPath);
+    const origExt = path.extname(oldPath);
+    const finalName = path.extname(newName) ? newName : `${newName}${origExt}`;
+    const newPath = path.join(dir, finalName);
+    await fs.rename(oldPath, newPath);
+    return { success: true, path: newPath, name: finalName };
+  } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+ipcMain.handle('open-in-explorer', async (event, targetPath) => {
+  try { shell.showItemInFolder(targetPath); return { success: true }; }
+  catch (error) { return { success: false, error: error.message }; }
 });
 
 // Get info about a path (file or folder) for favorites display
@@ -1231,4 +1323,449 @@ ipcMain.handle('get-path-info', async (event, targetPath) => {
   } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+// ---------- 2.0 asset library: recursive zip scan + embedded preview extraction ----------
+
+const zipPreviewCache = new Map();
+const PREVIEW_IMG_RE = /\.(png|jpe?g|webp)$/i;
+
+async function findAndExtractPreview(zipPath) {
+  const fh = await fs.open(zipPath, 'r');
+  try {
+    const stat = await fh.stat();
+    const size = stat.size;
+    if (size < 22) return null;
+    const tailLen = Math.min(size, 66560);
+    const tail = Buffer.alloc(tailLen);
+    await fh.read(tail, 0, tailLen, size - tailLen);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return null;
+    const cdSize = tail.readUInt32LE(eocd + 12);
+    const cdOffset = tail.readUInt32LE(eocd + 16);
+    if (!cdSize || cdOffset + cdSize > size) return null;
+    const cd = Buffer.alloc(cdSize);
+    await fh.read(cd, 0, cdSize, cdOffset);
+    const entries = [];
+    let p = 0;
+    while (p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50) {
+      const method = cd.readUInt16LE(p + 10);
+      const compSize = cd.readUInt32LE(p + 20);
+      const fnLen = cd.readUInt16LE(p + 28);
+      const extraLen = cd.readUInt16LE(p + 30);
+      const commentLen = cd.readUInt16LE(p + 32);
+      const localOffset = cd.readUInt32LE(p + 42);
+      const name = cd.toString('utf8', p + 46, p + 46 + fnLen);
+      entries.push({ name, method, compSize, localOffset });
+      p += 46 + fnLen + extraLen + commentLen;
+    }
+    const imgs = entries.filter((e) => PREVIEW_IMG_RE.test(e.name));
+    if (imgs.length === 0) return null;
+    const chosen =
+      imgs.find((e) => /preview/i.test(e.name)) ||
+      imgs.find((e) => /thumb/i.test(e.name)) ||
+      imgs.slice().sort((a, b) => a.compSize - b.compSize)[0];
+    const lh = Buffer.alloc(30);
+    await fh.read(lh, 0, 30, chosen.localOffset);
+    if (lh.readUInt32LE(0) !== 0x04034b50) return null;
+    const lfnLen = lh.readUInt16LE(26);
+    const lextraLen = lh.readUInt16LE(28);
+    const dataStart = chosen.localOffset + 30 + lfnLen + lextraLen;
+    const comp = Buffer.alloc(chosen.compSize);
+    await fh.read(comp, 0, chosen.compSize, dataStart);
+    let raw;
+    if (chosen.method === 0) raw = comp;
+    else if (chosen.method === 8) raw = zlib.inflateRawSync(comp);
+    else return null;
+    const ext = (chosen.name.split('.').pop() || 'png').toLowerCase();
+    const mime = (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'webp' ? 'image/webp' : 'image/png');
+    return { data: raw.toString('base64'), mime };
+  } finally {
+    await fh.close();
+  }
+}
+
+ipcMain.handle('read-zip-preview', async (event, zipPath) => {
+  try {
+    if (zipPreviewCache.has(zipPath)) return zipPreviewCache.get(zipPath);
+    const r = await findAndExtractPreview(zipPath);
+    const out = r ? { success: true, data: r.data, mime: r.mime } : { success: false };
+    zipPreviewCache.set(zipPath, out);
+    return out;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+async function scanAssetLibrary(rootPath, maxDepth, cap, acc, depth) {
+  if (acc.length >= cap || depth > maxDepth) return;
+  let entries;
+  try { entries = await fs.readdir(rootPath, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (acc.length >= cap) return;
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(rootPath, e.name);
+    if (e.isDirectory()) {
+      await scanAssetLibrary(full, maxDepth, cap, acc, depth + 1);
+    } else if (e.name.toLowerCase().endsWith('.zip')) {
+      acc.push({ name: e.name.replace(/\.zip$/i, ''), path: full, type: 'zipAsset' });
+    }
+  }
+}
+
+ipcMain.handle('scan-asset-library', async (event, rootPath) => {
+  try {
+    const acc = [];
+    await scanAssetLibrary(rootPath, 6, 3000, acc, 0);
+    return { success: true, items: acc };
+  } catch (error) {
+    return { success: false, error: error.message, items: [] };
+  }
+});
+
+const LIB_IMG_RE = /\.(png|jpe?g|webp|gif|bmp|tga|tif|tiff|exr)$/i;
+
+// Peek one level into a directory: does it hold files (=> asset), and a preview image.
+// Resolve real directory-ness. OneDrive/cloud placeholders and junctions can be
+// reparse points that readdir reports as non-directories; stat sees through them.
+async function resolveIsDir(full, e) {
+  if (e.isDirectory()) return true;
+  if (e.isFile()) return false;
+  try { const st = await fs.stat(full); return st.isDirectory(); } catch { return false; }
+}
+
+async function classifyDir(dirPath) {
+  let entries;
+  try { entries = await fs.readdir(dirPath, { withFileTypes: true }); } catch { return { hasSidecar: false, hasSubdir: false, hasFiles: false, hasZip: false, firstImage: null }; }
+  let hasSidecar = false;
+  let hasSubdir = false;
+  let hasFiles = false;
+  let hasZip = false;
+  let firstImage = null;
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(dirPath, e.name);
+    if (await resolveIsDir(full, e)) { hasSubdir = true; continue; }
+    hasFiles = true;
+    const lower = e.name.toLowerCase();
+    if (lower.endsWith('.dslmeta.json')) hasSidecar = true;
+    if (lower.endsWith('.zip')) hasZip = true;
+    if (!firstImage && LIB_IMG_RE.test(e.name)) firstImage = full;
+  }
+  return { hasSidecar, hasSubdir, hasFiles, hasZip, firstImage };
+}
+
+// List immediate children of a folder, classifying each subfolder as an asset
+// (contains files) or a category (only subfolders). Files map to file/zip assets.
+ipcMain.handle('list-library-entries', async (event, dirPath) => {
+  try {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    const items = [];
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      const full = path.join(dirPath, e.name);
+      if (await resolveIsDir(full, e)) {
+        const c = await classifyDir(full);
+        // JSON present => asset (even if it also nests sub-folders, e.g. LODs).
+        // No JSON but has sub-folders => category (stays browsable in the nav).
+        // No JSON, no sub-folders, just files => bare asset. Empty => category.
+        // Sidecar => asset (handles ingested assets that nest variant sub-folders).
+        // Otherwise any folder that contains sub-folders is a category.
+        // A leaf folder (files, no sub-folders) is a bare asset. Empty => category.
+        // Sidecar => single ingested asset (may nest variant sub-folders).
+        // Sub-folders OR zip files => a browsable category (the zips are its assets).
+        // A leaf with only component files (mesh/textures) => a single extracted asset.
+        if (c.hasSidecar) items.push({ name: e.name, path: full, kind: 'assetFolder', preview: c.firstImage });
+        else if (c.hasSubdir || c.hasZip) items.push({ name: e.name, path: full, kind: 'category' });
+        else if (c.hasFiles) items.push({ name: e.name, path: full, kind: 'assetFolder', preview: c.firstImage });
+        else items.push({ name: e.name, path: full, kind: 'category' });
+      } else {
+        if (e.name.endsWith('.dslmeta.json')) continue;
+        const lower = e.name.toLowerCase();
+        if (lower.endsWith('.zip')) items.push({ name: e.name.replace(/\.zip$/i, ''), path: full, kind: 'zipAsset' });
+        else items.push({ name: e.name, path: full, kind: 'file' });
+      }
+    }
+    return { success: true, items };
+  } catch (error) {
+    return { success: false, error: error.message, items: [] };
+  }
+});
+
+// Recursively collect ASSETS beneath a folder: descend through categories
+// (folders with sub-folders and no sidecar); emit leaf/sidecar folders and zips.
+async function collectAssets(dir, maxDepth, cap, acc, depth) {
+  if (acc.length >= cap || depth > maxDepth) return;
+  let entries;
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (acc.length >= cap) return;
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(dir, e.name);
+    if (await resolveIsDir(full, e)) {
+      const c = await classifyDir(full);
+      if (c.hasSidecar) {
+        acc.push({ name: e.name, path: full, kind: 'assetFolder', preview: c.firstImage });
+      } else if (c.hasSubdir || c.hasZip) {
+        await collectAssets(full, maxDepth, cap, acc, depth + 1);
+      } else if (c.hasFiles) {
+        acc.push({ name: e.name, path: full, kind: 'assetFolder', preview: c.firstImage });
+      }
+    } else if (e.name.toLowerCase().endsWith('.zip')) {
+      acc.push({ name: e.name.replace(/\.zip$/i, ''), path: full, kind: 'zipAsset' });
+    }
+  }
+}
+
+ipcMain.handle('scan-assets', async (event, rootPath) => {
+  try { const acc = []; await collectAssets(rootPath, 8, 5000, acc, 0); return { success: true, items: acc }; }
+  catch (error) { return { success: false, error: error.message, items: [] }; }
+});
+
+// ---------- Library index (network-drive-aware caching) ----------
+// Persist a scanned snapshot per library so the UI reads from cache instead of
+// walking the (often network/Dropbox) tree on every click. Rebuilt on demand.
+
+function indexFilePath() { return path.join(app.getPath('userData'), 'library-index.json'); }
+
+async function loadIndex() {
+  try { return JSON.parse(await fs.readFile(indexFilePath(), 'utf-8')); } catch { return { libraries: {} }; }
+}
+async function saveIndex(idx) {
+  try { await fs.writeFile(indexFilePath(), JSON.stringify(idx), 'utf-8'); return true; } catch { return false; }
+}
+
+// Full walk of one library: categories (folders), flat asset list, and dir mtimes.
+async function buildLibraryIndex(root, maxDepth = 12, cap = 100000) {
+  const folders = [];
+  const assets = [];
+  const mtimes = {};
+  let count = 0;
+  async function walk(dir, depth) {
+    if (count >= cap || depth > maxDepth) return;
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    try { const st = await fs.stat(dir); mtimes[dir] = st.mtimeMs; } catch {}
+    for (const e of entries) {
+      if (count >= cap) return;
+      if (e.name.startsWith('.')) continue;
+      const full = path.join(dir, e.name);
+      if (await resolveIsDir(full, e)) {
+        const c = await classifyDir(full);
+        if (c.hasSidecar) { assets.push({ path: full, parent: dir, name: e.name, kind: 'assetFolder', preview: c.firstImage }); count++; }
+        else if (c.hasSubdir || c.hasZip) { folders.push({ path: full, parent: dir, name: e.name, kind: 'category' }); await walk(full, depth + 1); }
+        else if (c.hasFiles) { assets.push({ path: full, parent: dir, name: e.name, kind: 'assetFolder', preview: c.firstImage }); count++; }
+        else { folders.push({ path: full, parent: dir, name: e.name, kind: 'category' }); }
+      } else if (e.name.toLowerCase().endsWith('.zip')) {
+        assets.push({ path: full, parent: dir, name: e.name.replace(/\.zip$/i, ''), kind: 'zipAsset' }); count++;
+      }
+    }
+  }
+  await walk(root, 0);
+  return { root, scannedAt: new Date().toISOString(), folders, assets, mtimes };
+}
+
+// Lightweight change probe: dir mtimes only (no per-file classification).
+async function collectDirMtimes(root, maxDepth, out, depth) {
+  if (depth > maxDepth) return out;
+  let entries;
+  try { entries = await fs.readdir(root, { withFileTypes: true }); } catch { return out; }
+  try { const st = await fs.stat(root); out[root] = st.mtimeMs; } catch {}
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(root, e.name);
+    if (await resolveIsDir(full, e)) await collectDirMtimes(full, maxDepth, out, depth + 1);
+  }
+  return out;
+}
+
+function countChanged(prevMtimes, nowMtimes) {
+  const keys = new Set([...Object.keys(prevMtimes || {}), ...Object.keys(nowMtimes || {})]);
+  let changed = 0;
+  for (const k of keys) { if ((prevMtimes || {})[k] !== (nowMtimes || {})[k]) changed++; }
+  return changed;
+}
+
+ipcMain.handle('index-load', async () => {
+  return { success: true, index: await loadIndex() };
+});
+
+ipcMain.handle('scan-libraries', async (event, roots) => {
+  const idx = await loadIndex();
+  const summary = [];
+  for (const root of (roots || [])) {
+    const prev = idx.libraries[root];
+    const built = await buildLibraryIndex(root);
+    const changed = prev ? countChanged(prev.mtimes, built.mtimes) : 0;
+    idx.libraries[root] = built;
+    summary.push({ root, folders: built.folders.length, assets: built.assets.length, scannedAt: built.scannedAt, changed });
+  }
+  await saveIndex(idx);
+  return { success: true, summary, index: idx };
+});
+
+ipcMain.handle('index-check', async (event, roots) => {
+  const idx = await loadIndex();
+  const results = [];
+  for (const root of (roots || [])) {
+    const prev = idx.libraries[root];
+    if (!prev) { results.push({ root, scanned: false, scannedAt: null, changed: null }); continue; }
+    const now = await collectDirMtimes(root, 12, {}, 0);
+    results.push({ root, scanned: true, scannedAt: prev.scannedAt, changed: countChanged(prev.mtimes, now) });
+  }
+  return { success: true, results };
+});
+
+// ---------- 2.0 catalog: per-asset sidecars + Megascans JSON extraction ----------
+
+const zipMetaCache = new Map();
+
+function sidecarPathFor(assetPath) {
+  return assetPath + '.dslmeta.json';
+}
+
+ipcMain.handle('sidecar-load', async (event, assetPath) => {
+  try {
+    const d = await fs.readFile(sidecarPathFor(assetPath), 'utf-8');
+    return { success: true, record: JSON.parse(d) };
+  } catch {
+    return { success: true, record: null };
+  }
+});
+
+ipcMain.handle('sidecar-save', async (event, { assetPath, record }) => {
+  try {
+    await fs.writeFile(sidecarPathFor(assetPath), JSON.stringify(record, null, 2), 'utf-8');
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+function normalizeMegascans(j) {
+  const autoTags = []
+    .concat(Array.isArray(j.tags) ? j.tags : [])
+    .concat(j.semanticTags && Array.isArray(j.semanticTags.tags) ? j.semanticTags.tags : []);
+  const categories = Array.isArray(j.categories) ? j.categories.map(String) : [];
+  const cat = categories.map((c) => c.toLowerCase());
+  let type = 'unknown';
+  if (cat.includes('surface')) type = 'surface';
+  else if (cat.includes('3dplant') || cat.includes('plant')) type = 'model';
+  else if (cat.includes('3d')) type = 'model';
+  else if (cat.includes('atlas')) type = 'texture';
+  else if (cat.includes('decal')) type = 'texture';
+  else if (cat.includes('brush')) type = 'brush';
+  return {
+    name: j.name || null,
+    originalId: j.id || j._id || null,
+    autoTags: Array.from(new Set(autoTags.map(String))),
+    categories,
+    type,
+    physicalSize: j.physicalSize || null,
+  };
+}
+
+async function readZipJson(zipPath) {
+  const fh = await fs.open(zipPath, 'r');
+  try {
+    const stat = await fh.stat();
+    const size = stat.size;
+    if (size < 22) return null;
+    const tailLen = Math.min(size, 66560);
+    const tail = Buffer.alloc(tailLen);
+    await fh.read(tail, 0, tailLen, size - tailLen);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) {
+      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return null;
+    const cdSize = tail.readUInt32LE(eocd + 12);
+    const cdOffset = tail.readUInt32LE(eocd + 16);
+    if (!cdSize || cdOffset + cdSize > size) return null;
+    const cd = Buffer.alloc(cdSize);
+    await fh.read(cd, 0, cdSize, cdOffset);
+    const entries = [];
+    let p = 0;
+    while (p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50) {
+      const method = cd.readUInt16LE(p + 10);
+      const compSize = cd.readUInt32LE(p + 20);
+      const fnLen = cd.readUInt16LE(p + 28);
+      const extraLen = cd.readUInt16LE(p + 30);
+      const commentLen = cd.readUInt16LE(p + 32);
+      const localOffset = cd.readUInt32LE(p + 42);
+      const name = cd.toString('utf8', p + 46, p + 46 + fnLen);
+      if (/\.json$/i.test(name)) entries.push({ name, method, compSize, localOffset });
+      p += 46 + fnLen + extraLen + commentLen;
+    }
+    if (entries.length === 0) return null;
+    const chosen = entries.slice().sort((a, b) => b.compSize - a.compSize)[0];
+    const lh = Buffer.alloc(30);
+    await fh.read(lh, 0, 30, chosen.localOffset);
+    if (lh.readUInt32LE(0) !== 0x04034b50) return null;
+    const dataStart = chosen.localOffset + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
+    const comp = Buffer.alloc(chosen.compSize);
+    await fh.read(comp, 0, chosen.compSize, dataStart);
+    let raw;
+    if (chosen.method === 0) raw = comp;
+    else if (chosen.method === 8) raw = zlib.inflateRawSync(comp);
+    else return null;
+    return JSON.parse(raw.toString('utf8'));
+  } catch {
+    return null;
+  } finally {
+    await fh.close();
+  }
+}
+
+ipcMain.handle('read-zip-metadata', async (event, zipPath) => {
+  try {
+    if (zipMetaCache.has(zipPath)) return zipMetaCache.get(zipPath);
+    const j = await readZipJson(zipPath);
+    const out = j ? { success: true, metadata: normalizeMegascans(j) } : { success: false };
+    zipMetaCache.set(zipPath, out);
+    return out;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ---------- 2.0 app settings (libraries + connections), persistent ----------
+
+function settingsFilePath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+ipcMain.handle('settings-load', async () => {
+  try {
+    const d = await fs.readFile(settingsFilePath(), 'utf-8');
+    const s = JSON.parse(d);
+    return { success: true, settings: { libraries: Array.isArray(s.libraries) ? s.libraries : [], connections: s.connections || {}, ...s } };
+  } catch {
+    return { success: true, settings: { libraries: [], connections: {} } };
+  }
+});
+
+ipcMain.handle('settings-save', async (event, settings) => {
+  try {
+    let existing = {};
+    try { existing = JSON.parse(await fs.readFile(settingsFilePath(), 'utf-8')); } catch {}
+    const merged = { ...existing, ...settings };
+    await fs.writeFile(settingsFilePath(), JSON.stringify(merged, null, 2), 'utf-8');
+    return { success: true, settings: merged };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ---------- 2.0: pick a single image file (for collection covers) ----------
+ipcMain.handle('select-image', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
 });

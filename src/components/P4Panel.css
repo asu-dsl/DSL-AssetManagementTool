@@ -25,7 +25,7 @@
   width: 450px;
   max-width: 90vw;
   height: 100%;
-  background: #ffffff;
+  background: var(--surface-1);
   box-shadow: -4px 0 20px rgba(0, 0, 0, 0.15);
   display: flex;
   flex-direction: column;
@@ -37,8 +37,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 16px 20px;
-  background: linear-gradient(135deg, #3D8B1F, #2d6617);
-  color: white;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
 }
 
 .p4-panel-title {
@@ -59,18 +59,18 @@
 
 .connection-badge.connected {
   background: rgba(255, 255, 255, 0.2);
-  color: white;
+  color: var(--primary-fg);
 }
 
 .connection-badge.disconnected {
-  background: rgba(255, 152, 0, 0.3);
-  color: #ffeb3b;
+  background: var(--bg-warning);
+  color: var(--warning);
 }
 
 .p4-close-btn {
   background: transparent;
   border: none;
-  color: white;
+  color: var(--primary-fg);
   cursor: pointer;
   padding: 4px;
   border-radius: 4px;
@@ -94,21 +94,21 @@
 }
 
 .p4-status-message.error {
-  background: #ffebee;
-  color: #c62828;
-  border-bottom: 1px solid #ef9a9a;
+  background: var(--bg-danger);
+  color: var(--danger);
+  border-bottom: 1px solid var(--danger);
 }
 
 .p4-status-message.success {
-  background: #e8f5e9;
-  color: #2e7d32;
-  border-bottom: 1px solid #a5d6a7;
+  background: var(--bg-success);
+  color: var(--success);
+  border-bottom: 1px solid var(--success);
 }
 
 .p4-status-message.info {
-  background: #e3f2fd;
-  color: #1565c0;
-  border-bottom: 1px solid #90caf9;
+  background: var(--bg-info);
+  color: var(--info);
+  border-bottom: 1px solid var(--info);
 }
 
 .p4-panel-content {
@@ -123,8 +123,8 @@
 }
 
 .p4-section {
-  background: #f5f5f5;
-  border: 1px solid #e0e0e0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: visible;
   flex-shrink: 0;
@@ -135,17 +135,17 @@
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  background: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
   font-weight: 600;
   font-size: 13px;
-  color: #333;
+  color: var(--text);
   transition: background 0.2s;
 }
 
 .p4-section-header:hover {
-  background: #fafafa;
+  background: var(--surface-3);
 }
 
 .p4-section-content {
@@ -160,11 +160,11 @@
   gap: 8px;
   padding: 6px 0;
   font-size: 12px;
-  color: #666;
+  color: var(--text-muted);
 }
 
 .p4-info-row svg {
-  color: #999;
+  color: var(--text-faint);
 }
 
 .p4-info-label {
@@ -173,7 +173,7 @@
 }
 
 .p4-info-value {
-  color: #333;
+  color: var(--text);
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 11px;
 }
@@ -185,35 +185,35 @@
 .p4-client-select {
   flex: 1;
   padding: 6px 10px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: #fff;
+  background: var(--surface-1);
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 11px;
-  color: #333;
+  color: var(--text);
   cursor: pointer;
   max-width: 200px;
 }
 
 .p4-client-select:hover {
-  border-color: #3D8B1F;
+  border-color: var(--primary);
 }
 
 .p4-client-select:focus {
   outline: none;
-  border-color: #3D8B1F;
-  box-shadow: 0 0 0 2px rgba(61, 139, 31, 0.2);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2);
 }
 
 .p4-root-row {
   margin-top: 4px;
   padding-top: 4px;
-  border-top: 1px dashed #e0e0e0;
+  border-top: 1px dashed var(--border);
 }
 
 .p4-root-value {
   word-break: break-all;
-  color: #666;
+  color: var(--text-muted);
   font-size: 10px;
 }
 
@@ -222,8 +222,8 @@
   display: flex;
   gap: 8px;
   padding: 12px;
-  background: #f9f9f9;
-  border: 1px solid #e0e0e0;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
@@ -232,19 +232,19 @@
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
-  background: #ffffff;
-  border: 1px solid #ddd;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 12px;
   font-weight: 500;
-  color: #333;
+  color: var(--text);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .p4-toolbar-btn:hover:not(:disabled) {
-  background: #f5f5f5;
-  border-color: #bbb;
+  background: var(--surface-2);
+  border-color: var(--text-faint);
 }
 
 .p4-toolbar-btn:disabled {
@@ -268,7 +268,7 @@
   align-items: center;
   gap: 8px;
   padding: 24px;
-  color: #999;
+  color: var(--text-faint);
   font-size: 13px;
 }
 
@@ -277,7 +277,7 @@
   justify-content: space-between;
   align-items: center;
   padding-bottom: 10px;
-  border-bottom: 1px solid #e0e0e0;
+  border-bottom: 1px solid var(--border);
   margin-bottom: 10px;
 }
 
@@ -286,7 +286,7 @@
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
 }
 
@@ -300,8 +300,8 @@
   gap: 4px;
   padding: 4px 8px;
   background: transparent;
-  border: 1px solid #e57373;
-  color: #e57373;
+  border: 1px solid var(--danger);
+  color: var(--danger);
   border-radius: 4px;
   font-size: 11px;
   cursor: pointer;
@@ -309,7 +309,7 @@
 }
 
 .p4-revert-selected:hover {
-  background: #ffebee;
+  background: var(--bg-danger);
 }
 
 .p4-files-list {
@@ -321,8 +321,8 @@
 }
 
 .p4-file-item {
-  background: #ffffff;
-  border: 1px solid #e0e0e0;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
 }
@@ -341,7 +341,7 @@
   flex: 1;
   font-size: 13px;
   font-weight: 500;
-  color: #333;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -356,24 +356,24 @@
 }
 
 .p4-file-action.add {
-  background: #e3f2fd;
-  color: #1976d2;
+  background: var(--bg-info);
+  color: var(--info);
 }
 
 .p4-file-action.edit {
-  background: #fff3e0;
-  color: #f57c00;
+  background: var(--bg-warning);
+  color: var(--warning);
 }
 
 .p4-file-action.delete {
-  background: #ffebee;
-  color: #d32f2f;
+  background: var(--bg-danger);
+  color: var(--danger);
 }
 
 .p4-diff-btn {
   background: transparent;
   border: none;
-  color: #999;
+  color: var(--text-faint);
   cursor: pointer;
   padding: 4px;
   border-radius: 4px;
@@ -383,13 +383,13 @@
 }
 
 .p4-diff-btn:hover {
-  background: #f0f0f0;
-  color: #666;
+  background: var(--surface-2);
+  color: var(--text-muted);
 }
 
 .p4-file-path {
   font-size: 10px;
-  color: #999;
+  color: var(--text-faint);
   font-family: 'Consolas', 'Monaco', monospace;
   margin-top: 4px;
   white-space: nowrap;
@@ -398,15 +398,15 @@
 }
 
 /* Action icons */
-.action-add { color: #1976d2; }
-.action-edit { color: #f57c00; }
-.action-delete { color: #d32f2f; }
+.action-add { color: var(--info); }
+.action-edit { color: var(--warning); }
+.action-delete { color: var(--danger); }
 
 /* Diff View */
 .p4-diff-view {
   margin-top: 8px;
   padding: 8px;
-  background: #1e1e1e;
+  background: var(--surface-3);
   border-radius: 4px;
   max-height: 200px;
   overflow: auto;
@@ -416,15 +416,15 @@
   margin: 0;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 11px;
-  color: #d4d4d4;
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-all;
 }
 
 /* Submit Section */
 .p4-submit-section {
-  background: #ffffff;
-  border: 2px solid #3D8B1F;
+  background: var(--surface-1);
+  border: 2px solid var(--primary);
   border-radius: 8px;
   padding: 16px;
   flex-shrink: 0;
@@ -433,7 +433,7 @@
 .p4-submit-section h4 {
   margin: 0 0 12px 0;
   font-size: 14px;
-  color: #333;
+  color: var(--text);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -442,7 +442,7 @@
 .p4-submit-description {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 13px;
   font-family: inherit;
@@ -453,11 +453,11 @@
 
 .p4-submit-description:focus {
   outline: none;
-  border-color: #3D8B1F;
+  border-color: var(--primary);
 }
 
 .p4-submit-description::placeholder {
-  color: #aaa;
+  color: var(--text-faint);
 }
 
 .p4-submit-footer {
@@ -469,7 +469,7 @@
 
 .p4-submit-count {
   font-size: 12px;
-  color: #666;
+  color: var(--text-muted);
 }
 
 .p4-submit-btn {
@@ -477,8 +477,8 @@
   align-items: center;
   gap: 8px;
   padding: 10px 20px;
-  background: linear-gradient(135deg, #3D8B1F, #2d6617);
-  color: white;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
   border: none;
   border-radius: 6px;
   font-size: 14px;
@@ -489,7 +489,7 @@
 
 .p4-submit-btn:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(61, 139, 31, 0.3);
+  box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.3);
 }
 
 .p4-submit-btn:disabled {
@@ -522,20 +522,20 @@
   cursor: pointer;
   transition: background 0.2s;
   font-size: 12px;
-  color: #333;
+  color: var(--text);
 }
 
 .p4-stream-item:hover {
-  background: rgba(61, 139, 31, 0.08);
+  background: rgba(var(--primary-rgb), 0.08);
 }
 
 .p4-stream-item.active {
-  background: rgba(61, 139, 31, 0.15);
-  border: 1px solid rgba(61, 139, 31, 0.3);
+  background: rgba(var(--primary-rgb), 0.15);
+  border: 1px solid rgba(var(--primary-rgb), 0.3);
 }
 
 .p4-stream-item svg {
-  color: #3D8B1F;
+  color: var(--primary);
   flex-shrink: 0;
 }
 
@@ -549,9 +549,9 @@
 
 .stream-type {
   font-size: 10px;
-  color: #999;
+  color: var(--text-faint);
   padding: 2px 6px;
-  background: #f0f0f0;
+  background: var(--surface-2);
   border-radius: 3px;
   flex-shrink: 0;
 }
@@ -575,12 +575,12 @@
   cursor: pointer;
   border-radius: 4px;
   font-size: 12px;
-  color: #333;
+  color: var(--text);
   transition: background 0.2s;
 }
 
 .depot-dir-item:hover {
-  background: rgba(61, 139, 31, 0.08);
+  background: rgba(var(--primary-rgb), 0.08);
 }
 
 .depot-dir-item svg {
@@ -597,9 +597,9 @@
 
 .depot-type {
   font-size: 10px;
-  color: #999;
+  color: var(--text-faint);
   padding: 2px 6px;
-  background: #f0f0f0;
+  background: var(--surface-2);
   border-radius: 3px;
 }
 
@@ -609,11 +609,11 @@
   gap: 6px;
   padding: 4px 8px;
   font-size: 11px;
-  color: #666;
+  color: var(--text-muted);
 }
 
 .depot-file-item svg {
-  color: #999;
+  color: var(--text-faint);
   flex-shrink: 0;
 }
 
@@ -626,13 +626,5 @@
 
 .depot-file-rev {
   font-size: 10px;
-  color: #999;
-  font-family: 'Consolas', 'Monaco', monospace;
-}
-
-.depot-loading {
-  text-align: center;
-  padding: 8px;
-  font-size: 12px;
-  color: #999;
-}
+  color: var(--text-faint);
+  fon
