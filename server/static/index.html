@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AMS API Test Page</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  form { display: grid; gap: 0.6rem; margin-bottom: 2rem; padding: 1rem; border: 1px solid #8884; border-radius: 8px; }
+  label { font-size: 0.85rem; opacity: 0.8; }
+  input, textarea { padding: 0.4rem; font-size: 0.95rem; }
+  button { padding: 0.5rem 1rem; cursor: pointer; }
+  #status { font-size: 0.9rem; min-height: 1.2em; }
+  #status.error { color: #c0392b; }
+  #status.ok { color: #27ae60; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
+  .card { border: 1px solid #8884; border-radius: 8px; overflow: hidden; }
+  .card img { width: 100%; height: 140px; object-fit: cover; display: block; }
+  .card .info { padding: 0.5rem; font-size: 0.8rem; }
+  .card .info b { display: block; font-size: 0.9rem; margin-bottom: 0.2rem; }
+  .card button { width: 100%; border: none; background: #c0392b; color: white; padding: 0.4rem; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+  <h1>AMS API Test Page</h1>
+
+  <form id="upload-form">
+    <div>
+      <label for="file">Image file</label><br>
+      <input type="file" id="file" accept="image/*" required>
+    </div>
+    <div>
+      <label for="title">Title</label><br>
+      <input type="text" id="title">
+    </div>
+    <div>
+      <label for="author">Author</label><br>
+      <input type="text" id="author">
+    </div>
+    <div>
+      <label for="tags">Tags (comma-separated)</label><br>
+      <input type="text" id="tags">
+    </div>
+    <div>
+      <label for="version">Version</label><br>
+      <input type="text" id="version">
+    </div>
+    <div>
+      <label for="notes">Notes</label><br>
+      <textarea id="notes" rows="2"></textarea>
+    </div>
+    <button type="submit">Upload</button>
+    <div id="status"></div>
+  </form>
+
+  <h2>Stored Images</h2>
+  <div class="grid" id="gallery"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const galleryEl = document.getElementById('gallery');
+
+    function setStatus(message, isError) {
+      statusEl.textContent = message;
+      statusEl.className = isError ? 'error' : 'ok';
+    }
+
+    async function loadGallery() {
+      const res = await fetch('/images');
+      if (!res.ok) {
+        setStatus('Failed to load images: ' + res.status, true);
+        return;
+      }
+      const images = await res.json();
+      galleryEl.innerHTML = '';
+      for (const img of images) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <img src="/images/${img.id}" alt="${img.metadata.title || img.originalFilename}">
+          <div class="info">
+            <b>${img.metadata.title || img.originalFilename}</b>
+            ${img.metadata.author ? 'Author: ' + img.metadata.author + '<br>' : ''}
+            ${img.metadata.tags.length ? 'Tags: ' + img.metadata.tags.join(', ') + '<br>' : ''}
+            ${(img.size / 1024).toFixed(1)} KB
+          </div>
+          <button data-id="${img.id}">Delete</button>
+        `;
+        card.querySelector('button').addEventListener('click', () => deleteImage(img.id));
+        galleryEl.appendChild(card);
+      }
+    }
+
+    async function deleteImage(id) {
+      const res = await fetch(`/images/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        setStatus('Delete failed: ' + res.status, true);
+        return;
+      }
+      setStatus('Deleted image ' + id, false);
+      loadGallery();
+    }
+
+    document.getElementById('upload-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fileInput = document.getElementById('file');
+      if (!fileInput.files.length) return;
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('title', document.getElementById('title').value);
+      formData.append('author', document.getElementById('author').value);
+      formData.append('tags', document.getElementById('tags').value);
+      formData.append('version', document.getElementById('version').value);
+      formData.append('notes', document.getElementById('notes').value);
+
+      setStatus('Uploading...', false);
+      const res = await fetch('/images', { method: 'POST', body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setStatus('Upload failed: ' + (err.detail || res.status), true);
+        return;
+      }
+      setStatus('Uploaded successfully.', false);
+      e.target.reset();
+      loadGallery();
+    });
+
+    loadGallery();
+  </script>
+</body>
+</html>

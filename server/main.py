@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pymongo.errors import ServerSelectionTimeoutError
 
 from db import assets_collection
+from images import router as images_router
 from models import AssetIn, AssetOut
 
 app = FastAPI(title="DSL Asset Management API")
+app.include_router(images_router)
+app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")
 
 
 def _serialize(doc: dict) -> dict:

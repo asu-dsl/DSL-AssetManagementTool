@@ -7,4 +7,5 @@ dist-packaged
 release/
 server/.env
 server/__pycache__/
+server/storage/
 **/__pycache__/
