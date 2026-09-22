@@ -67,12 +67,15 @@
     }
 
     async function loadGallery() {
+      console.log('[LIST] GET /images');
       const res = await fetch('/images');
       if (!res.ok) {
+        console.error('[LIST] failed:', res.status);
         setStatus('Failed to load images: ' + res.status, true);
         return;
       }
       const images = await res.json();
+      console.log('[LIST] received', images.length, 'image(s):', images);
       galleryEl.innerHTML = '';
       for (const img of images) {
         const card = document.createElement('div');
@@ -93,11 +96,15 @@
     }
 
     async function deleteImage(id) {
+      console.log('[DELETE] DELETE /images/' + id);
       const res = await fetch(`/images/${id}`, { method: 'DELETE' });
       if (!res.ok) {
+        console.error('[DELETE] failed:', res.status);
         setStatus('Delete failed: ' + res.status, true);
         return;
       }
+      const result = await res.json();
+      console.log('[DELETE] succeeded:', result);
       setStatus('Deleted image ' + id, false);
       loadGallery();
     }
@@ -115,13 +122,22 @@
       formData.append('version', document.getElementById('version').value);
       formData.append('notes', document.getElementById('notes').value);
 
+      console.log('[CREATE] POST /images', {
+        filename: fileInput.files[0].name,
+        title: formData.get('title'),
+        author: formData.get('author'),
+        tags: formData.get('tags'),
+      });
       setStatus('Uploading...', false);
       const res = await fetch('/images', { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
+        console.error('[CREATE] failed:', res.status, err);
         setStatus('Upload failed: ' + (err.detail || res.status), true);
         return;
       }
+      const result = await res.json();
+      console.log('[CREATE] succeeded:', result);
       setStatus('Uploaded successfully.', false);
       e.target.reset();
       loadGallery();

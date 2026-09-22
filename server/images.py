@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from db import STORAGE_DIR, images_collection
 
+logger = logging.getLogger("ams.images")
 router = APIRouter(prefix="/images", tags=["images"])
 
 
@@ -33,7 +35,10 @@ async def upload_image(
     version: str = Form(""),
     notes: str = Form(""),
 ):
+    logger.info("CREATE image requested: filename=%s contentType=%s", file.filename, file.content_type)
+
     if not (file.content_type or "").startswith("image/"):
+        logger.warning("CREATE image rejected: filename=%s contentType=%s", file.filename, file.content_type)
         raise HTTPException(status_code=400, detail="File must be an image")
 
     contents = await file.read()
@@ -57,29 +62,39 @@ async def upload_image(
         "updatedAt": now,
     }
     doc["_id"] = images_collection.insert_one(doc).inserted_id
+    logger.info("CREATE image succeeded: id=%s storedName=%s size=%d", doc["_id"], stored_name, doc["size"])
     return _serialize(doc)
 
 
 @router.get("")
 def list_images():
-    return [_serialize(doc) for doc in images_collection.find().sort("createdAt", -1)]
+    logger.info("LIST images requested")
+    results = [_serialize(doc) for doc in images_collection.find().sort("createdAt", -1)]
+    logger.info("LIST images returned %d result(s)", len(results))
+    return results
 
 
 @router.get("/{image_id}")
 def get_image_file(image_id: str):
+    logger.info("READ image requested: id=%s", image_id)
     doc = images_collection.find_one({"_id": _get_object_id(image_id)})
     if not doc:
+        logger.warning("READ image failed, not found: id=%s", image_id)
         raise HTTPException(status_code=404, detail="Image not found")
     path = STORAGE_DIR / doc["storedName"]
     if not path.exists():
+        logger.error("READ image failed, file missing on disk: id=%s storedName=%s", image_id, doc["storedName"])
         raise HTTPException(status_code=404, detail="Image file missing on disk")
     return FileResponse(path, media_type=doc["contentType"])
 
 
 @router.delete("/{image_id}")
 def delete_image(image_id: str):
+    logger.info("DELETE image requested: id=%s", image_id)
     doc = images_collection.find_one_and_delete({"_id": _get_object_id(image_id)})
     if not doc:
+        logger.warning("DELETE image failed, not found: id=%s", image_id)
         raise HTTPException(status_code=404, detail="Image not found")
     (STORAGE_DIR / doc["storedName"]).unlink(missing_ok=True)
+    logger.info("DELETE image succeeded: id=%s storedName=%s", image_id, doc["storedName"])
     return {"status": "deleted"}
