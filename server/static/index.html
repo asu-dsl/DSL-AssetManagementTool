@@ -9,7 +9,7 @@
   h1 { font-size: 1.4rem; }
   form { display: grid; gap: 0.6rem; margin-bottom: 2rem; padding: 1rem; border: 1px solid #8884; border-radius: 8px; }
   label { font-size: 0.85rem; opacity: 0.8; }
-  input, textarea { padding: 0.4rem; font-size: 0.95rem; }
+  input, textarea, select { padding: 0.4rem; font-size: 0.95rem; }
   button { padding: 0.5rem 1rem; cursor: pointer; }
   #status { font-size: 0.9rem; min-height: 1.2em; }
   #status.error { color: #c0392b; }
@@ -17,8 +17,12 @@
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
   .card { border: 1px solid #8884; border-radius: 8px; overflow: hidden; }
   .card img { width: 100%; height: 140px; object-fit: cover; display: block; }
+  .card .placeholder { width: 100%; height: 140px; display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; background: #8882; }
   .card .info { padding: 0.5rem; font-size: 0.8rem; }
   .card .info b { display: block; font-size: 0.9rem; margin-bottom: 0.2rem; }
+  .card .category { display: inline-block; font-size: 0.7rem; opacity: 0.6; text-transform: uppercase; margin-bottom: 0.2rem; }
+  .card a.download { display: block; text-align: center; font-size: 0.8rem; padding: 0.3rem; }
   .card button { width: 100%; border: none; background: #c0392b; color: white; padding: 0.4rem; font-size: 0.8rem; }
 </style>
 </head>
@@ -27,8 +31,8 @@
 
   <form id="upload-form">
     <div>
-      <label for="file">Image file</label><br>
-      <input type="file" id="file" accept="image/*" required>
+      <label for="file">Asset file (image, 3D model, video, audio, or document)</label><br>
+      <input type="file" id="file" accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.obj,.gltf,.glb,.fbx,.dae,.stl,.mp4,.mov,.avi,.mkv,.mp3,.wav,.ogg,.pdf,.txt,.doc,.docx" required>
     </div>
     <div>
       <label for="title">Title</label><br>
@@ -54,12 +58,22 @@
     <div id="status"></div>
   </form>
 
-  <h2>Stored Images</h2>
+  <h2>Stored Assets</h2>
+  <label for="category-filter">Filter by category</label><br>
+  <select id="category-filter">
+    <option value="">All</option>
+    <option value="image">Image</option>
+    <option value="model">3D Model</option>
+    <option value="video">Video</option>
+    <option value="audio">Audio</option>
+    <option value="document">Document</option>
+  </select>
   <div class="grid" id="gallery"></div>
 
   <script>
     const statusEl = document.getElementById('status');
     const galleryEl = document.getElementById('gallery');
+    const categoryFilterEl = document.getElementById('category-filter');
 
     function setStatus(message, isError) {
       statusEl.textContent = message;
@@ -67,37 +81,44 @@
     }
 
     async function loadGallery() {
-      console.log('[LIST] GET /images');
-      const res = await fetch('/images');
+      const category = categoryFilterEl.value;
+      const url = category ? `/assets?category=${category}` : '/assets';
+      console.log('[LIST] GET', url);
+      const res = await fetch(url);
       if (!res.ok) {
         console.error('[LIST] failed:', res.status);
-        setStatus('Failed to load images: ' + res.status, true);
+        setStatus('Failed to load assets: ' + res.status, true);
         return;
       }
-      const images = await res.json();
-      console.log('[LIST] received', images.length, 'image(s):', images);
+      const assets = await res.json();
+      console.log('[LIST] received', assets.length, 'asset(s):', assets);
       galleryEl.innerHTML = '';
-      for (const img of images) {
+      for (const asset of assets) {
         const card = document.createElement('div');
         card.className = 'card';
+        const preview = asset.category === 'image'
+          ? `<img src="/assets/${asset.id}" alt="${asset.metadata.title || asset.originalFilename}">`
+          : `<div class="placeholder">${asset.category}</div>`;
         card.innerHTML = `
-          <img src="/images/${img.id}" alt="${img.metadata.title || img.originalFilename}">
+          ${preview}
           <div class="info">
-            <b>${img.metadata.title || img.originalFilename}</b>
-            ${img.metadata.author ? 'Author: ' + img.metadata.author + '<br>' : ''}
-            ${img.metadata.tags.length ? 'Tags: ' + img.metadata.tags.join(', ') + '<br>' : ''}
-            ${(img.size / 1024).toFixed(1)} KB
+            <span class="category">${asset.category}</span>
+            <b>${asset.metadata.title || asset.originalFilename}</b>
+            ${asset.metadata.author ? 'Author: ' + asset.metadata.author + '<br>' : ''}
+            ${asset.metadata.tags.length ? 'Tags: ' + asset.metadata.tags.join(', ') + '<br>' : ''}
+            ${(asset.size / 1024).toFixed(1)} KB
           </div>
-          <button data-id="${img.id}">Delete</button>
+          <a class="download" href="/assets/${asset.id}" target="_blank">View / Download</a>
+          <button data-id="${asset.id}">Delete</button>
         `;
-        card.querySelector('button').addEventListener('click', () => deleteImage(img.id));
+        card.querySelector('button').addEventListener('click', () => deleteAsset(asset.id));
         galleryEl.appendChild(card);
       }
     }
 
-    async function deleteImage(id) {
-      console.log('[DELETE] DELETE /images/' + id);
-      const res = await fetch(`/images/${id}`, { method: 'DELETE' });
+    async function deleteAsset(id) {
+      console.log('[DELETE] DELETE /assets/' + id);
+      const res = await fetch(`/assets/${id}`, { method: 'DELETE' });
       if (!res.ok) {
         console.error('[DELETE] failed:', res.status);
         setStatus('Delete failed: ' + res.status, true);
@@ -105,9 +126,11 @@
       }
       const result = await res.json();
       console.log('[DELETE] succeeded:', result);
-      setStatus('Deleted image ' + id, false);
+      setStatus('Deleted asset ' + id, false);
       loadGallery();
     }
+
+    categoryFilterEl.addEventListener('change', loadGallery);
 
     document.getElementById('upload-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -122,14 +145,14 @@
       formData.append('version', document.getElementById('version').value);
       formData.append('notes', document.getElementById('notes').value);
 
-      console.log('[CREATE] POST /images', {
+      console.log('[CREATE] POST /assets', {
         filename: fileInput.files[0].name,
         title: formData.get('title'),
         author: formData.get('author'),
         tags: formData.get('tags'),
       });
       setStatus('Uploading...', false);
-      const res = await fetch('/images', { method: 'POST', body: formData });
+      const res = await fetch('/assets', { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         console.error('[CREATE] failed:', res.status, err);
