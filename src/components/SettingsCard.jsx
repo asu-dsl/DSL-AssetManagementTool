@@ -10,7 +10,7 @@ function fmtScan(info) {
   return out;
 }
 
-function SettingsCard({ open, onClose, libraries, onAddLibrary, onRelink, onRemove, onScan, scanning, scanInfo, p4, onTestPerforce }) {
+function SettingsCard({ open, onClose, libraries, onAddLibrary, onRelink, onRemove, onScan, scanning, scanInfo, p4, onTestPerforce, onOpenP4Login }) {
   const [newName, setNewName] = useState('');
   const [newSide, setNewSide] = useState('resources');
   if (!open) return null;
@@ -28,15 +28,29 @@ function SettingsCard({ open, onClose, libraries, onAddLibrary, onRelink, onRemo
             <span className="set-dot" style={{ background: p4 && p4.connected ? 'var(--success)' : 'var(--text-faint)' }} />
             <span className="set-conn-name">Perforce</span>
             <span className="set-conn-sub">{p4 && p4.connected ? ('connected · ' + (p4.user || '')) : 'not connected'}</span>
-            <button className="set-btn" type="button" onClick={onTestPerforce}>test</button>
+            <button className="set-btn" type="button" onClick={onTestPerforce}>Test</button>
+            <button
+              className="set-btn-primary set-btn-login"
+              type="button"
+              disabled={!!(p4 && p4.connected)}
+              onClick={onOpenP4Login}>
+                Login
+            </button>
           </div>
           <div className="set-conn">
+            <span className="set-dot" style={{ background: 'var(--text-faint)' }} />
+            <span className="set-conn-name">NAS Server</span>
+            <span className="set-conn-sub">backup storage</span>
+            {/* // TODO: Implement NAS server connection */}
+            <button className="set-btn" type="button" disabled>soon</button>
+          </div>
+          <div className="set-conn" style={{ opacity: 0.3 }}>
             <span className="set-dot" style={{ background: 'var(--text-faint)' }} />
             <span className="set-conn-name">Coda</span>
             <span className="set-conn-sub">production tracking</span>
             <button className="set-btn" type="button" disabled>soon</button>
           </div>
-          <div className="set-conn">
+          <div className="set-conn" style={{ opacity: 0.3 }}>
             <span className="set-dot" style={{ background: 'var(--text-faint)' }} />
             <span className="set-conn-name">AI assistant</span>
             <span className="set-conn-sub">local model / API</span>

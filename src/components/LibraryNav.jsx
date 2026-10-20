@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Library, ChevronRight, ChevronDown, Plus, RefreshCw } from 'lucide-react';
+import { Library, ChevronRight, ChevronDown, Plus, RefreshCw, GitBranch } from 'lucide-react';
 import './LibraryNav.css';
+
+export const P4_ART_DEPOT = { id: '__p4_art_depot__', root: '//Art', name: 'Art (P4 Depot)' };
 
 const coverCache = new Map();
 const IMG_RE = /\.(png|jpe?g|webp|gif|bmp|tga|tif|tiff|exr)$/;
 
-async function sampleCovers(root) {
-  if (coverCache.has(root)) return coverCache.get(root);
+async function sampleLocalCovers(root) {
   const out = [];
   const queue = [root];
   let visited = 0;
@@ -23,6 +24,38 @@ async function sampleCovers(root) {
       else if (IMG_RE.test(n)) out.push({ path: it.path, type: 'image', ext: n.split('.').pop() });
     }
   }
+  return out;
+}
+
+async function sampleDepotCovers(root) {
+  const out = [];
+  const queue = [root];
+  let visited = 0;
+  // Each p4 call spawns a CLI subprocess (unlike local fs reads), so this
+  // traversal stays much tighter than the local-library BFS above.
+  while (queue.length && out.length < 3 && visited < 12) {
+    const dir = queue.shift();
+    visited += 1;
+    let dirsRes, filesRes;
+    try {
+      [dirsRes, filesRes] = await Promise.all([
+        window.electron.p4GetDepotDirs(dir),
+        window.electron.p4GetDepotFiles(dir),
+      ]);
+    } catch { continue; }
+    for (const f of (filesRes && filesRes.success ? filesRes.files : []) || []) {
+      if (out.length >= 3) break;
+      const n = (f.name || '').toLowerCase();
+      if (IMG_RE.test(n)) out.push({ path: f.depotFile, type: 'p4Image', ext: n.split('.').pop() });
+    }
+    ((dirsRes && dirsRes.success ? dirsRes.dirs : []) || []).forEach((d) => queue.push(d));
+  }
+  return out;
+}
+
+async function sampleCovers(root) {
+  if (coverCache.has(root)) return coverCache.get(root);
+  const out = root.startsWith('//') ? await sampleDepotCovers(root) : await sampleLocalCovers(root);
   coverCache.set(root, out);
   return out;
 }
@@ -49,6 +82,11 @@ function Tile({ member }) {
         if (member.type === 'zipAsset') {
           const r = await window.electron.readZipPreview(member.path);
           if (!c && r && r.success && r.data) setSrc(`data:${r.mime || 'image/png'};base64,${r.data}`);
+        } else if (member.type === 'p4Image') {
+          const pr = await window.electron.p4PrintDepotFile(member.path);
+          if (c || !pr || !pr.success) return;
+          const r = await window.electron.readFile(pr.localPath);
+          if (!c && r && r.success && r.data) setSrc(`data:image/${member.ext || 'png'};base64,${r.data}`);
         } else {
           const r = await window.electron.readFile(member.path);
           if (!c && r && r.success && r.data) setSrc(`data:image/${member.ext || 'png'};base64,${r.data}`);
@@ -135,14 +173,19 @@ function LibraryNav({ libraries, side, onSideChange, activeScope, onSelectScope,
         <button type="button" className={`ln-side${currentSide === 'assets' ? ' active' : ''}`} onClick={() => onSideChange && onSideChange('assets')}>Assets</button>
         <button type="button" className={`ln-side${currentSide === 'resources' ? ' active' : ''}`} onClick={() => onSideChange && onSideChange('resources')}>Resources</button>
       </div>
-      <div className="ln-head">
+      {/* Temporarily Removed, upload button will be moved to bottom left panel */}
+      {/* <div className="ln-head">
         <span className="ln-title"><Library size={14} /> {currentSide === 'resources' ? 'resource libraries' : 'asset libraries'}</span>
         <button className="ln-manage" type="button" onClick={onManage} aria-label="manage libraries"><Plus size={16} /></button>
-      </div>
+      </div> */}
       <div className="ln-list">
-        {shown.length === 0 && (
+        <div className="ln-section">
+          <span className="ln-section-title"><GitBranch size={12} /> perforce</span>
+          <LibraryCard lib={P4_ART_DEPOT} activeScope={activeScope} onSelectScope={onSelectScope} getChildren={getChildren} />
+        </div>
+        {/* {shown.length === 0 && (
           <div className="ln-empty">no {currentSide} libraries yet — click + to add one in settings.</div>
-        )}
+        )} */}
         {shown.map((lib) => (
           <LibraryCard key={lib.id} lib={lib} activeScope={activeScope} onSelectScope={onSelectScope} getChildren={getChildren} />
         ))}

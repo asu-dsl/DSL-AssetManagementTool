@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { 
-  GitBranch, RefreshCw, Upload, RotateCcw, Download, 
+import {
+  GitBranch, RefreshCw, Upload, RotateCcw, Download,
   FileText, FilePlus, FileEdit, Trash2, ChevronDown, ChevronRight,
   Server, User, FolderGit, AlertCircle, CheckCircle, Clock, X,
-  Eye, Folder
+  Eye
 } from 'lucide-react';
 import './P4Panel.css';
 
@@ -24,14 +24,9 @@ const P4Panel = ({ isOpen, onClose, currentFolder }) => {
     connection: true,
     pending: true,
     streams: false,
-    depot: false,
   });
   const [streams, setStreams] = useState([]);
   const [selectedStream, setSelectedStream] = useState(null);
-  const [depots, setDepots] = useState([]);
-  const [depotTree, setDepotTree] = useState({});
-  const [expandedDepotPaths, setExpandedDepotPaths] = useState(new Set());
-  const [depotLoading, setDepotLoading] = useState(false);
 
   // Initial load and connection check
   useEffect(() => {
@@ -315,100 +310,6 @@ const P4Panel = ({ isOpen, onClose, currentFolder }) => {
     }
   };
 
-  // Load depot list
-  const loadDepots = async () => {
-    if (!window.electron) return;
-    setDepotLoading(true);
-    try {
-      const result = await window.electron.p4GetDepots();
-      if (result && result.success) {
-        setDepots(result.depots || []);
-      } else {
-        setStatusMessage({ type: 'error', text: result?.error || 'Failed to load depots' });
-      }
-    } catch (error) {
-      console.error('Failed to load depots:', error);
-      setStatusMessage({ type: 'error', text: 'Failed to load depots: ' + (error.message || 'Unknown error') });
-    } finally {
-      setDepotLoading(false);
-    }
-  };
-
-  // Toggle depot directory expansion
-  const toggleDepotDir = async (dirPath) => {
-    const newExpanded = new Set(expandedDepotPaths);
-    if (newExpanded.has(dirPath)) {
-      newExpanded.delete(dirPath);
-    } else {
-      newExpanded.add(dirPath);
-      if (!depotTree[dirPath]) {
-        setDepotLoading(true);
-        try {
-          const [dirsResult, filesResult] = await Promise.all([
-            window.electron.p4GetDepotDirs(dirPath).catch(() => ({ success: false, dirs: [] })),
-            window.electron.p4GetDepotFiles(dirPath).catch(() => ({ success: false, files: [] })),
-          ]);
-          setDepotTree(prev => ({
-            ...prev,
-            [dirPath]: {
-              dirs: (dirsResult && dirsResult.success) ? dirsResult.dirs : [],
-              files: (filesResult && filesResult.success) ? filesResult.files : [],
-            }
-          }));
-        } catch (error) {
-          console.error('Failed to browse depot:', error);
-          setDepotTree(prev => ({
-            ...prev,
-            [dirPath]: { dirs: [], files: [] }
-          }));
-        } finally {
-          setDepotLoading(false);
-        }
-      }
-    }
-    setExpandedDepotPaths(newExpanded);
-  };
-
-  // Render depot directory tree
-  const renderDepotNode = (dirPath, level = 0) => {
-    const children = depotTree[dirPath];
-    if (!children) return null;
-    try {
-      return (
-        <>
-          {(children.dirs || []).map(dir => {
-            const isExpanded = expandedDepotPaths.has(dir);
-            const dirName = dir.split('/').filter(Boolean).pop() || dir;
-            return (
-              <div key={dir}>
-                <div
-                  className="depot-dir-item"
-                  style={{ paddingLeft: `${level * 16 + 8}px` }}
-                  onClick={() => toggleDepotDir(dir)}
-                >
-                  {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  <Folder size={14} color="#00ff88" />
-                  <span>{dirName}</span>
-                </div>
-                {isExpanded && renderDepotNode(dir, level + 1)}
-              </div>
-            );
-          })}
-          {(children.files || []).map((file, i) => (
-            <div key={i} className="depot-file-item" style={{ paddingLeft: `${level * 16 + 28}px` }}>
-              <FileText size={14} />
-              <span className="depot-file-name">{file.name || 'unknown'}</span>
-              <span className="depot-file-rev">#{file.revision || 0}</span>
-            </div>
-          ))}
-        </>
-      );
-    } catch (error) {
-      console.error('Error rendering depot node:', error);
-      return <div className="depot-loading">Error loading contents</div>;
-    }
-  };
-
   const getActionIcon = (action) => {
     switch (action) {
       case 'add': return <FilePlus size={14} className="action-add" />;
@@ -561,50 +462,6 @@ const P4Panel = ({ isOpen, onClose, currentFolder }) => {
                     ))}
                   </div>
                 )}
-              </div>
-            )}
-          </div>
-
-          {/* Depot Browser Section */}
-          <div className="p4-section">
-            <div
-              className="p4-section-header"
-              onClick={() => toggleSection('depot')}
-            >
-              {expandedSections.depot ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-              <span>Depot Browser</span>
-            </div>
-            {expandedSections.depot && (
-              <div className="p4-section-content p4-depot-browser">
-                {depots.length === 0 ? (
-                  <button className="p4-toolbar-btn p4-load-btn" onClick={loadDepots} disabled={depotLoading}>
-                    <RefreshCw size={14} />
-                    <span>Browse Depot</span>
-                  </button>
-                ) : (
-                  <div className="p4-depot-tree">
-                    {depots.map((depot, i) => {
-                      if (!depot || !depot.name) return null;
-                      const depotPath = `//${depot.name}`;
-                      const isExpanded = expandedDepotPaths.has(depotPath);
-                      return (
-                        <div key={i}>
-                          <div
-                            className="depot-dir-item depot-root"
-                            onClick={() => toggleDepotDir(depotPath)}
-                          >
-                            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                            <Folder size={14} color="#00ff88" />
-                            <span className="depot-name">{depot.name}</span>
-                            <span className="depot-type">{depot.type}</span>
-                          </div>
-                          {isExpanded && renderDepotNode(depotPath, 1)}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {depotLoading && <div className="depot-loading">Loading...</div>}
               </div>
             )}
           </div>

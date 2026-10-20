@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import TopBar from './components/TopBar';
-import LibraryNav from './components/LibraryNav';
+import LibraryNav, { P4_ART_DEPOT } from './components/LibraryNav';
 import LibraryGrid from './components/LibraryGrid';
+import UploadPanel from './components/UploadPanel';
+import PerforceLoginModal from './components/PerforceLoginModal';
 import FilterPanel from './components/FilterPanel';
 import AssetViewer from './components/AssetViewer';
 import MetadataPanel from './components/MetadataPanel';
@@ -9,7 +11,7 @@ import P4Panel from './components/P4Panel';
 import ProfileCard from './components/ProfileCard';
 import SettingsCard from './components/SettingsCard';
 import CollectionsCard from './components/CollectionsCard';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Download } from 'lucide-react';
 import './App.css';
 
 class ErrorBoundary extends React.Component {
@@ -151,7 +153,11 @@ function App() {
   const [fileMetadata, setFileMetadata] = useState({});
   const [showP4Panel, setShowP4Panel] = useState(false);
   const [profile, setProfile] = useState({ displayName: '', key: '' });
-  const [p4, setP4] = useState({ available: false, connected: false, user: null });
+  const [p4, setP4] = useState({ available: false, connected: false, user: null, error: null, server: null });
+  const [p4LoginDismissed, setP4LoginDismissed] = useState(false);
+  // Read independently of login state — p4 info omits the server address
+  // when not authenticated, which is exactly when the login form needs it.
+  const [p4ConfiguredServer, setP4ConfiguredServer] = useState(null);
   const [leftW, setLeftW] = useState(320);
   const [rightW, setRightW] = useState(372);
   const [leftSplit, setLeftSplit] = useState(0.5);
@@ -178,6 +184,13 @@ function App() {
 
   // Immediate category children of a folder — from index, else a single live read.
   const getChildren = useCallback(async (dir) => {
+    if (dir.startsWith('//')) {
+      try {
+        const r = await window.electron.p4GetDepotDirs(dir);
+        if (r && r.success) return (r.dirs || []).map((d) => ({ name: d.split('/').filter(Boolean).pop() || d, path: d }));
+      } catch { /* ignore */ }
+      return [];
+    }
     const entry = indexEntryForPath(dir);
     if (entry) return (entry.folders || []).filter((f) => f.parent === dir).map((f) => ({ name: f.name, path: f.path }));
     try {
@@ -241,18 +254,66 @@ function App() {
         const avail = await window.electron.p4CheckAvailable();
         if (avail && avail.available) {
           const info = await window.electron.p4GetInfo();
-          if (info && info.success) setP4({ available: true, connected: !!info.connected, user: info.user });
-          else setP4({ available: true, connected: false, user: null });
+          if (info && info.success) setP4({ available: true, connected: !!info.connected, user: info.user, error: info.sessionError || null, server: info.server || null });
+          else setP4({ available: true, connected: false, user: null, error: null, server: null });
+          const configuredServer = await window.electron.p4GetConfiguredServer();
+          if (configuredServer && configuredServer.success) setP4ConfiguredServer(configuredServer.server);
         }
       } catch (e) { console.error('p4 init failed', e); }
     })();
   }, []);
+
+  // Background session poll — cheap (p4 login -s, no client list refetch)
+  // so it's safe to run periodically. Paused while the window isn't visible,
+  // and re-checks immediately on refocus instead of waiting for the next tick.
+  useEffect(() => {
+    if (!p4.available) return;
+    let active = true;
+    const poll = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const r = await window.electron.p4CheckSession();
+        if (active) setP4((prev) => ({ ...prev, connected: !!r.connected, error: r.error || null }));
+      } catch { /* ignore — keep last known state */ }
+    };
+    const interval = setInterval(poll, 45000);
+    document.addEventListener('visibilitychange', poll);
+    return () => {
+      active = false;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', poll);
+    };
+  }, [p4.available]);
+
+  // Once reconnected, clear any earlier dismissal so the login modal shows
+  // fresh the next time a disconnect is actually detected.
+  useEffect(() => {
+    if (p4.connected) setP4LoginDismissed(false);
+  }, [p4.connected]);
 
   useEffect(() => {
     if (activeCollectionId) return;
     if (!currentPath) { setFiles([]); return; }
     let active = true;
     (async () => {
+      if (currentPath.startsWith('//')) {
+        try {
+          const r = await window.electron.p4GetDepotFiles(currentPath);
+          if (!active) return;
+          const items = (r && r.success) ? (r.files || []) : [];
+          setFiles(items.map((f) => ({
+            name: f.name,
+            path: f.depotFile,
+            ext: extOf(f.name),
+            type: typeFromName(f.name),
+            isP4Depot: true,
+            side: librarySide,
+          })));
+        } catch {
+          if (active) setFiles([]);
+        }
+        return;
+      }
       const toGrid = (it) => (it.kind === 'assetFolder')
         ? { name: it.name, path: it.path, ext: 'folder', type: 'folderAsset', preview: it.preview || null, side: librarySide }
         : { name: it.name, path: it.path, ext: 'zip', type: 'zipAsset', side: librarySide };
@@ -488,9 +549,14 @@ function App() {
 
   const handleMetadataUpdate = (metadata) => {
     if (!previewFile) return;
+    // Depot previews use a fresh local temp path every single fetch (see
+    // p4PrintDepotFile), so previewFile.path is never stable across repeat
+    // views of the same asset — sourcePath (the real depot path) is the
+    // only key that's actually reusable for these.
+    const key = previewFile.sourcePath || previewFile.path;
     setFileMetadata((prev) => ({
       ...prev,
-      [previewFile.path]: { ...(prev[previewFile.path] || {}), ...metadata },
+      [key]: { ...(prev[key] || {}), ...metadata },
     }));
   };
 
@@ -558,8 +624,58 @@ function App() {
     if (f && f.type === 'folderAsset') handleSelectScope(f.path);
   }, [handleSelectScope]);
 
+  // Depot files aren't local paths — fetch their content via p4 print to a
+  // temp file first, then preview that like any other local asset.
+  const handleSelectAsset = useCallback(async (f) => {
+    if (f && f.isP4Depot) {
+      try {
+        const r = await window.electron.p4PrintDepotFile(f.path);
+        if (r && r.success) setPreviewFile({ name: r.name, path: r.localPath, sourcePath: f.path });
+      } catch { /* ignore */ }
+      return;
+    }
+    setPreviewFile(f);
+  }, []);
+
+  // By the time an asset is previewed, its full content already sits at
+  // previewFile.path locally (for depot assets, that's the temp file p4
+  // print already fetched for the preview itself) — so download is just
+  // "ask where to save it, then copy," identical for local and depot assets.
+  const handleDownloadAsset = useCallback(async () => {
+    if (!previewFile) return;
+    try {
+      const r = await window.electron.downloadAsset({ sourcePath: previewFile.path, suggestedName: previewFile.name });
+      if (r && !r.success && !r.canceled) {
+        alert('Download failed: ' + (r.error || 'unknown error'));
+      }
+    } catch (e) {
+      alert('Download failed: ' + (e && e.message ? e.message : e));
+    }
+  }, [previewFile]);
+
+  // Fetch a depot asset's .dslmeta.json sidecar on demand — only when it's
+  // actually opened, never eagerly for a whole folder listing, matching how
+  // this is meant to stay lightweight without a full depot clone. A missing
+  // sidecar is normal (asset just has no metadata yet), not an error.
+  useEffect(() => {
+    if (!previewFile || !previewFile.isP4Depot || !previewFile.sourcePath) return;
+    if (fileMetadata[previewFile.sourcePath]) return;
+    let active = true;
+    (async () => {
+      try {
+        const r = await window.electron.p4GetAssetMetadata(previewFile.sourcePath);
+        if (active && r && r.success && r.record) {
+          setFileMetadata((prev) => ({ ...prev, [previewFile.sourcePath]: r.record }));
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { active = false; };
+  }, [previewFile, fileMetadata]);
+
   const activeLib = (!activeCollectionId && currentPath)
-    ? libraries.find((l) => currentPath === l.root || currentPath.startsWith(l.root + '\\') || currentPath.startsWith(l.root + '/'))
+    ? (currentPath.startsWith('//')
+      ? P4_ART_DEPOT
+      : libraries.find((l) => currentPath === l.root || currentPath.startsWith(l.root + '\\') || currentPath.startsWith(l.root + '/')))
     : null;
   const crumbs = (() => {
     if (!activeLib) return [];
@@ -590,12 +706,15 @@ function App() {
               displayName={profile.displayName || profile.key || 'Artist'}
               p4User={p4.user}
               p4Connected={p4.connected}
-              codaConnected={false}
+              p4Error={p4.error}
+              onOpenP4Login={() => setP4LoginDismissed(false)}
+              // codaConnected={false}
+              // TODO: add NAS connected 
               onEditDisplayName={(v) => persistProfile({ displayName: v })}
               onConnectPerforce={async () => {
                 try {
                   const i = await window.electron.p4GetInfo();
-                  if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user });
+                  if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user, error: i.sessionError || null, server: i.server || null });
                   else alert('Perforce not connected - check that p4 is configured for this workspace.');
                 } catch (e) { alert('Perforce check failed.'); }
               }}
@@ -607,6 +726,9 @@ function App() {
         </div>
 
         <div className="app2-left">
+          <div className="upload-host">
+            <UploadPanel currentPath={currentPath} />
+          </div>
           <div className="browser-host" style={{ flex: leftSplit + ' 1 0' }}>
             <LibraryNav
               libraries={libraries}
@@ -621,8 +743,11 @@ function App() {
             />
           </div>
           <div className="rz-row" onMouseDown={startSplit('splitL')} />
-          <div className="collections-host" style={{ flex: (1 - leftSplit) + ' 1 0' }}>
-            <CollectionsCard
+          {/* <div className="collections-host" style={{ flex: (1 - leftSplit) + ' 1 0' }}> */}
+            {/* TODO: Upload to p4 repo from local device */}
+
+            {/* Temporarily Removed, will integrate UI into asset navigation panel */}
+            {/* <CollectionsCard
               official={officialCollections}
               mine={myCollections}
               activeId={activeCollectionId}
@@ -637,8 +762,8 @@ function App() {
               onToggleLock={handleToggleLock}
               onCreateOfficial={handleCreateOfficial}
               onCreateMine={handleCreateMine}
-            />
-          </div>
+            /> */}
+          {/* </div> */}
           <div className="app-version">DSL Asset Manager {APP_VERSION}</div>
         </div>
 
@@ -668,8 +793,8 @@ function App() {
             <div className="grid-host">
               <LibraryGrid
                 files={gridFiles}
-                selectedPath={previewFile ? previewFile.path : null}
-                onSelectAsset={setPreviewFile}
+                selectedPath={previewFile ? (previewFile.sourcePath || previewFile.path) : null}
+                onSelectAsset={handleSelectAsset}
                 onOpenAsset={handleOpenAsset}
                 onContext={handleAssetContext}
               />
@@ -681,9 +806,22 @@ function App() {
         <div className="app2-right app2-cell">
           <div className="app2-right-stack">
             <div className="preview-host" style={{ flex: rightSplit + ' 1 0' }}>
-              {previewFile && previewFile.type === 'zipAsset'
-                ? <ZipPreview path={previewFile.path} />
-                : <AssetViewer file={previewFile} selectedFiles={[]} />}
+              <div className="preview-content">
+                {previewFile && previewFile.type === 'zipAsset'
+                  ? <ZipPreview path={previewFile.path} />
+                  : <AssetViewer file={previewFile} selectedFiles={[]} />}
+              </div>
+              <div className="preview-download-bar">
+                <button
+                  className="dl-btn"
+                  type="button"
+                  disabled={!previewFile}
+                  onClick={handleDownloadAsset}
+                >
+                  <Download size={14} />
+                  {previewFile ? 'Download Asset' : 'Select an asset to download'}
+                </button>
+              </div>
             </div>
             <div className="rz-row" onMouseDown={startSplit('splitR')} />
             <div className="meta-host" style={{ flex: (1 - rightSplit) + ' 1 0' }}>
@@ -693,7 +831,7 @@ function App() {
                   <MetadataPanel
                     selectedFiles={previewFile ? [previewFile] : []}
                     currentFile={previewFile}
-                    metadata={previewFile ? fileMetadata[previewFile.path] : null}
+                    metadata={previewFile ? fileMetadata[previewFile.sourcePath || previewFile.path] : null}
                     onMetadataUpdate={handleMetadataUpdate}
                     onOpenP4Panel={() => setShowP4Panel(true)}
                   />
@@ -705,6 +843,18 @@ function App() {
       </div>
 
       <P4Panel isOpen={showP4Panel} onClose={() => setShowP4Panel(false)} currentFolder={currentPath} />
+      <PerforceLoginModal
+        open={p4.available && !p4.connected && !p4LoginDismissed}
+        defaultServer={p4ConfiguredServer || p4.server}
+        defaultUser={p4.user}
+        onClose={() => setP4LoginDismissed(true)}
+        onSuccess={async () => {
+          try {
+            const r = await window.electron.p4CheckSession();
+            setP4((prev) => ({ ...prev, connected: !!r.connected, error: r.error || null }));
+          } catch { /* ignore */ }
+        }}
+      />
       <SettingsCard
         open={showSettings}
         onClose={() => setShowSettings(false)}
@@ -719,9 +869,10 @@ function App() {
         onTestPerforce={async () => {
           try {
             const i = await window.electron.p4GetInfo();
-            if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user });
+            if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user, error: i.sessionError || null, server: i.server || null });
           } catch (e) { /* ignore */ }
         }}
+        onOpenP4Login={() => setP4LoginDismissed(false)}
       />
       <ConfirmDialog
         open={!!confirm}

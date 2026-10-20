@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Settings, Pencil } from 'lucide-react';
+import { Settings, Pencil, AlertTriangle } from 'lucide-react';
 import './ProfileCard.css';
 
 function initialsOf(name) {
@@ -8,22 +8,41 @@ function initialsOf(name) {
   return (parts[0][0] + (parts[1] ? parts[1][0] : '')).toUpperCase();
 }
 
-function ProfileCard({ displayName, p4User, p4Connected, codaConnected, onEditDisplayName, onConnectPerforce, onConnectCoda, onOpenSettings }) {
+function ProfileCard({ displayName, p4User, p4Connected, p4Error, codaConnected, onEditDisplayName, onConnectPerforce, onConnectCoda, onOpenSettings, onOpenP4Login }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState('');
   const startEdit = () => { setName(displayName || ''); setEditing(true); };
   const commit = () => { const n = name.trim(); if (n && onEditDisplayName) onEditDisplayName(n); setEditing(false); };
   return (
     <div className="pf-bar">
+      {!p4Connected && (
+        <div
+          className="pf-warn"
+          tabIndex={0}
+          role="button"
+          onClick={onOpenP4Login}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onOpenP4Login && onOpenP4Login(); }}
+        >
+          {/* TODO: Make error apply for all connection statuses, not just P4 */}
+          <AlertTriangle size={20} />
+          <div className="pf-tooltip" role="tooltip">{p4Error ? `P4 Connection Error: ${p4Error}` : 'Perforce is not connected.'}</div>
+        </div>
+      )}
       <div className="pf-conns">
         <button className="pf-conn" type="button" onClick={onConnectPerforce} title={p4Connected ? ('Perforce: ' + (p4User || 'connected')) : 'Perforce not connected'}>
           <span className="pf-dot" style={{ background: p4Connected ? 'var(--success)' : 'var(--text-faint)' }} />
           Perforce
         </button>
-        <button className="pf-conn" type="button" onClick={onConnectCoda} title={codaConnected ? 'Coda connected' : 'Coda not connected'}>
+
+        {/* TODO: Implement Nas server connection */}
+        <button className="pf-conn" type="button" onClick={onConnectPerforce} title={p4Connected ? ('Perforce: ' + (p4User || 'connected')) : 'Perforce not connected'}>
+          <span className="pf-dot" style={{ background: p4Connected ? 'var(--success)' : 'var(--text-faint)' }} />
+          NAS Server
+        </button>
+        {/* <button className="pf-conn" type="button" onClick={onConnectCoda} title={codaConnected ? 'Coda connected' : 'Coda not connected'}>
           <span className="pf-dot" style={{ background: codaConnected ? 'var(--success)' : 'var(--text-faint)' }} />
           Coda
-        </button>
+        </button> */}
       </div>
 
       <div className="pf-user">

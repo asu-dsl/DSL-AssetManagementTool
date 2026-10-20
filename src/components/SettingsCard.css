@@ -24,6 +24,9 @@
 .set-input { flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); padding: 9px 11px; font-size: 13px; }
 .set-btn-primary { display: flex; align-items: center; gap: 6px; background: var(--primary); color: var(--primary-fg); border: none; border-radius: 10px; padding: 9px 14px; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 
+.set-btn-login { padding: 5px 12px; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; cursor:pointer; }
+.set-btn-login:disabled { opacity: 0.3; cursor: default; }
+
 .set-lib-side { display: inline-block; font-size: 10px; color: var(--text-muted); background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; }
 .set-add-side { display: flex; gap: 3px; padding: 3px; background: var(--surface-2); border-radius: 10px; margin-bottom: 8px; max-width: 240px; }
 .set-side { flex: 1; border: none; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 500; padding: 6px 0; border-radius: 7px; cursor: pointer; }

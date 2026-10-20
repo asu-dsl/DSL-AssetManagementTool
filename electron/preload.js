@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electron', {
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   readDirectoryTree: (path) => ipcRenderer.invoke('read-directory-tree', path),
   saveJson: (data) => ipcRenderer.invoke('save-json', data),
+  downloadAsset: (data) => ipcRenderer.invoke('download-asset', data),
   readFile: (path) => ipcRenderer.invoke('read-file', path),
   getCommonFolders: () => ipcRenderer.invoke('get-common-folders'),
 
@@ -14,6 +15,9 @@ contextBridge.exposeInMainWorld('electron', {
 
   p4CheckAvailable: () => ipcRenderer.invoke('p4-check-available'),
   p4CheckConnection: () => ipcRenderer.invoke('p4-check-connection'),
+  p4CheckSession: () => ipcRenderer.invoke('p4-check-session'),
+  p4GetConfiguredServer: () => ipcRenderer.invoke('p4-get-configured-server'),
+  p4Login: (data) => ipcRenderer.invoke('p4-login', data),
   p4GetInfo: () => ipcRenderer.invoke('p4-get-info'),
   p4RefreshStatus: () => ipcRenderer.invoke('p4-refresh-status'),
   p4SetClient: (clientName) => ipcRenderer.invoke('p4-set-client', clientName),
@@ -39,6 +43,11 @@ contextBridge.exposeInMainWorld('electron', {
   p4GetDepots: () => ipcRenderer.invoke('p4-get-depots'),
   p4GetDepotDirs: (path) => ipcRenderer.invoke('p4-get-depot-dirs', path),
   p4GetDepotFiles: (path) => ipcRenderer.invoke('p4-get-depot-files', path),
+  p4PrintDepotFile: (depotPath) => ipcRenderer.invoke('p4-print-depot-file', depotPath),
+  p4GetAssetMetadata: (depotPath) => ipcRenderer.invoke('p4-get-asset-metadata', depotPath),
+  selectUploadFiles: () => ipcRenderer.invoke('select-upload-files'),
+  p4UploadToDepot: (data) => ipcRenderer.invoke('p4-upload-to-depot', data),
+  p4ResolveArtClient: () => ipcRenderer.invoke('p4-resolve-art-client'),
 
   p4AddFiles: (data) => ipcRenderer.invoke('p4-add-files', data),
   p4SearchFiles: (options) => ipcRenderer.invoke('p4-search-files', options),

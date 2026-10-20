@@ -1,4 +1,46 @@
 .pf-bar { display: flex; align-items: center; gap: 12px; }
+
+.pf-warn { position: relative; display: flex; color: var(--warning); cursor: pointer; }
+.pf-tooltip {
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  margin-right: 10px;
+  width: max-content;
+  max-width: 220px;
+  background: var(--surface-1);
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(var(--primary-rgb), 0.15);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-50%) translateX(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 50;
+  pointer-events: none;
+}
+.pf-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 9px;
+  height: 9px;
+  margin-top: -5px;
+  background: var(--surface-1);
+  border-top: 1px solid var(--primary);
+  border-right: 1px solid var(--primary);
+  transform: rotate(45deg);
+}
+.pf-warn:hover .pf-tooltip, .pf-warn:focus .pf-tooltip, .pf-warn:focus-visible .pf-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-50%) translateX(0);
+}
 .pf-conns { display: flex; flex-direction: column; gap: 3px; }
 .pf-conn { display: flex; align-items: center; gap: 5px; background: transparent; border: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 1px 0; }
 .pf-conn:hover { color: var(--text); }

@@ -1,0 +1,157 @@
+.up-host { display: flex; flex-direction: column; gap: 6px; padding: 10px; }
+
+.up-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.up-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.3);
+}
+.up-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+.up-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.up-pending:hover { background: var(--surface-2); color: var(--text); }
+
+.up-status {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.up-status.error { background: var(--bg-danger); color: var(--danger); }
+.up-status.success { background: var(--bg-success); color: var(--success); }
+
+.up-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.up-modal {
+  width: 420px;
+  max-width: 90vw;
+  max-height: 80vh;
+  background: var(--surface-1);
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.up-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+.up-modal-close { background: transparent; border: none; color: var(--primary-fg); cursor: pointer; display: flex; }
+
+.up-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  overflow-y: auto;
+  max-height: 240px;
+}
+.up-empty { font-size: 12px; color: var(--text-faint); text-align: center; padding: 12px 0; }
+
+.up-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+.up-file-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-file-action { font-size: 10px; text-transform: uppercase; color: var(--text-faint); }
+.action-add { color: var(--info); }
+.action-edit { color: var(--warning); }
+.action-delete { color: var(--danger); }
+
+.up-desc {
+  margin: 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 60px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.up-desc:focus { outline: none; border-color: var(--primary); }
+.up-desc::placeholder { color: var(--text-faint); }
+
+.up-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px;
+}
+
+.up-draft-btn {
+  padding: 10px 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.up-draft-btn:hover { background: var(--surface-2); color: var(--text); }
+
+.up-submit-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.up-submit-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.3);
+}
+.up-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
