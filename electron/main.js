@@ -7,6 +7,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import * as perforceService from './services/perforce.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -182,6 +183,25 @@ ipcMain.handle('save-json', async (event, data) => {
   }
 });
 
+// Targeted download: by the time an asset is being previewed, its full
+// content already exists locally at sourcePath — for a depot asset, that's
+// the temp file p4 print already fetched for the preview itself. So
+// "download" is just "ask where to save it, then copy" — no second fetch,
+// no workspace, works identically for local and depot assets.
+ipcMain.handle('download-asset', async (event, { sourcePath, suggestedName }) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Download Asset',
+    defaultPath: suggestedName || path.basename(sourcePath),
+  });
+  if (result.canceled || !result.filePath) return { success: false, canceled: true };
+  try {
+    await fs.copyFile(sourcePath, result.filePath);
+    return { success: true, path: result.filePath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
     const buffer = await fs.readFile(filePath);
@@ -216,6 +236,7 @@ let p4Config = {
   clients: [], // List of available workspaces
   connected: false,
   lastCheck: null,
+  artDepotClient: null, // Workspace resolved to map //Art/... — see resolveLocalPathForDepot
 };
 
 // P4 Class wrapper for clean command execution
@@ -393,6 +414,17 @@ ipcMain.handle('p4-check-connection', async () => {
   }
 });
 
+// Lightweight check for background polling — deliberately does NOT refetch
+// the client list (that's p4-get-info's job, reserved for explicit user
+// actions) so this stays cheap enough to poll frequently.
+ipcMain.handle('p4-check-session', () => perforceService.checkSession());
+ipcMain.handle('p4-get-configured-server', () => perforceService.getConfiguredServer());
+
+// Explicit login flow: server + user + password in, a session ticket
+// written to disk by `p4` itself out. See services/perforce.js for the
+// security rationale (password never touches argv, never stored by us).
+ipcMain.handle('p4-login', (event, data) => perforceService.login(data));
+
 ipcMain.handle('p4-get-info', async () => {
   try {
     const { stdout, stderr } = await execAsync('p4 info', { encoding: 'utf8', timeout: 10000 });
@@ -425,10 +457,11 @@ ipcMain.handle('p4-get-info', async () => {
     p4Config.lastCheck = Date.now();
     
     // Fetch list of user's workspaces with their roots
+    let sessionError = null;
     try {
       const { stdout: clientsOutput } = await execAsync(`p4 clients -u "${info.user_name}"`, { encoding: 'utf8' });
       const clients = [];
-      
+
       clientsOutput.split('\n').forEach(line => {
         // Format: Client NAME DATE root PATH 'description'
         // Find "root " and then extract path up to " '" (space before description quote)
@@ -440,7 +473,7 @@ ipcMain.handle('p4-get-info', async () => {
             // Find the space before the description quote
             const descStart = afterRoot.indexOf(" '");
             const rootPath = descStart > 0 ? afterRoot.substring(0, descStart) : afterRoot.trim();
-            
+
             clients.push({
               name: nameMatch[1],
               root: rootPath,
@@ -448,29 +481,32 @@ ipcMain.handle('p4-get-info', async () => {
           }
         }
       });
-      
+
       p4Config.clients = clients;
       console.log('Found P4 clients:', JSON.stringify(clients.slice(0, 5), null, 2), `... and ${clients.length - 5} more`);
-      
+
       // Set default client from info
       p4Config.client = info.client_name;
     } catch (e) {
       console.error('Failed to fetch P4 clients:', e);
       p4Config.clients = [];
+      sessionError = (e.stderr || e.stdout || e.message || '').toString().trim() || null;
     }
-    
+
     console.log('P4 Config stored:', p4Config);
-    
-    // Connected if we have server address and user name
-    const isConnected = !!(info.server_address && info.user_name);
-    
+
+    // Connected if we have server address, user name, and a valid (non-expired) session
+    const isConnected = !!(info.server_address && info.user_name) && !sessionError;
+    p4Config.connected = isConnected;
+
     return {
       success: true,
-      user: info.user_name || 'Unknown',
-      client: info.client_name || 'Unknown',
-      server: info.server_address || 'Unknown',
+      user: info.user_name || null,
+      client: info.client_name || null,
+      server: info.server_address || null,
       root: info.client_root || null,
       connected: isConnected,
+      sessionError,
       clients: p4Config.clients || [], // Return available workspaces
     };
   } catch (error) {
@@ -642,7 +678,7 @@ ipcMain.handle('p4-get-opened', async (event, clientName = null) => {
     const lines = output.split('\n').filter(l => l.trim());
     
     for (const line of lines) {
-      const match = line.match(/^(.+)#(\d+)\s+-\s+(\w+)\s+(default\s+change|\w+)\s+\((\w+)\)/);
+      const match = line.match(/^(.+)#(\d+)\s+-\s+(\w+)\s+(default\s+change|\w+)\s+\(([^)]+)\)/);
       if (match) {
         files.push({
           depotFile: match[1],
@@ -1067,45 +1103,95 @@ ipcMain.handle('p4-get-depots', async () => {
 });
 
 // Browse depot directories
-ipcMain.handle('p4-get-depot-dirs', async (event, depotPath) => {
-  try {
-    const searchPath = depotPath.endsWith('/') ? depotPath + '*' : depotPath + '/*';
-    const { stdout } = await runP4Command(`dirs "${searchPath}"`, p4Config.client);
-    const dirs = stdout.split('\n').filter(l => l.trim()).map(d => d.trim());
-    return { success: true, dirs };
-  } catch (error) {
-    if (error.message?.includes('no such file') || error.message?.includes('must refer to client')) {
-      return { success: true, dirs: [] };
-    }
-    return { success: false, error: error.message, dirs: [] };
-  }
+ipcMain.handle('p4-get-depot-dirs', (event, depotPath) => perforceService.listDepotDirs(depotPath, { user: p4Config.user }));
+ipcMain.handle('p4-get-depot-files', (event, depotPath) => perforceService.listDepotFiles(depotPath, { user: p4Config.user }));
+
+// Fetch a depot file's content directly (p4 print), without syncing it to a
+// workspace, so it can be previewed even outside any client's view mapping.
+ipcMain.handle('p4-print-depot-file', (event, depotPath) => perforceService.printToTempFile(depotPath, { user: p4Config.user }));
+
+// Depot-sourced sidecar metadata (title/author/tags/notes) — see
+// services/perforce.js for why "no sidecar yet" is success, not an error.
+ipcMain.handle('p4-get-asset-metadata', (event, depotPath) => perforceService.getAssetMetadata(depotPath, { user: p4Config.user }));
+
+// Pick one or more arbitrary local files to upload into the depot (no
+// extension restriction — P4 tracks any file type).
+ipcMain.handle('select-upload-files', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) return [];
+  return result.filePaths;
 });
 
-// Browse depot files
-ipcMain.handle('p4-get-depot-files', async (event, depotPath) => {
-  try {
-    const searchPath = depotPath.endsWith('/') ? depotPath + '*' : depotPath + '/*';
-    const { stdout } = await runP4Command(`files "${searchPath}"`, p4Config.client);
-    const files = [];
-    const lines = stdout.split('\n').filter(l => l.trim());
-    for (const line of lines) {
-      const match = line.match(/^(.+)#(\d+)\s+-\s+(\w+)/);
-      if (match) {
-        files.push({
-          depotFile: match[1],
-          revision: parseInt(match[2]),
-          action: match[3],
-          name: match[1].split('/').pop(),
-        });
-      }
-    }
-    return { success: true, files };
-  } catch (error) {
-    if (error.message?.includes('no such file') || error.message?.includes('must refer to client')) {
-      return { success: true, files: [] };
-    }
-    return { success: false, error: error.message, files: [] };
+// Find (or, failing that, create) a workspace mapped to the Art depot, so
+// the app works on a machine that has never touched P4V. The app-wide
+// "active client" is frequently just the machine's default placeholder
+// (e.g. "OEC1605"), which may not be a real, mapped workspace — so this
+// always tries real candidates first and only creates one as a last resort.
+async function ensureArtDepotClient() {
+  const candidates = [];
+  if (p4Config.artDepotClient) candidates.push(p4Config.artDepotClient);
+  if (p4Config.client) candidates.push(p4Config.client);
+  for (const c of (p4Config.clients || [])) {
+    if (!candidates.includes(c.name)) candidates.push(c.name);
   }
+
+  let resolved = await perforceService.resolveLocalPathForDepot('//Art/...', candidates, { user: p4Config.user });
+  if (!resolved) {
+    if (!p4Config.user) return { success: false, error: 'Not logged in to Perforce.' };
+    const clientName = `ams-${p4Config.user.replace(/[^\w.-]/g, '_')}-art`;
+    const localRoot = path.join(app.getPath('userData'), 'p4-workspace');
+    await fs.mkdir(localRoot, { recursive: true });
+    const created = await perforceService.createMinimalClient({ user: p4Config.user, depotRoot: '//Art', localRoot, clientName });
+    if (!created.success) return { success: false, error: created.error };
+    resolved = await perforceService.resolveLocalPathForDepot('//Art/...', [clientName], { user: p4Config.user });
+    if (!resolved) return { success: false, error: 'Workspace was created but could not be resolved.' };
+  }
+  p4Config.artDepotClient = resolved.client;
+  return { success: true, client: resolved.client };
+}
+
+// The Art-depot workspace, cached separately from the app's general-purpose
+// "active client" (which other features overwrite for unrelated reasons —
+// e.g. reconnecting Perforce resets it to the machine's default placeholder).
+// The upload feature should never silently start pointing at the wrong
+// workspace just because something else touched that shared value.
+ipcMain.handle('p4-resolve-art-client', () => ensureArtDepotClient());
+
+// Copy picked local file(s) into a workspace's local folder for a given
+// depot folder (resolved via `p4 where`), then `p4 add` each one.
+ipcMain.handle('p4-upload-to-depot', async (event, { depotFolder, filePaths }) => {
+  const ensured = await ensureArtDepotClient();
+  if (!ensured.success) {
+    return { success: true, results: filePaths.map((p) => ({ file: path.basename(p), success: false, error: ensured.error })) };
+  }
+  const client = ensured.client;
+
+  const results = [];
+  for (const srcPath of filePaths) {
+    const baseName = path.basename(srcPath);
+    const depotTarget = `${depotFolder.replace(/\/+$/, '')}/${baseName}`;
+    try {
+      const resolved = await perforceService.resolveLocalPathForDepot(depotTarget, [client], { user: p4Config.user });
+      if (!resolved) throw new Error('Could not resolve a local path for this depot location in the workspace.');
+      const { localPath } = resolved;
+
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.copyFile(srcPath, localPath);
+
+      const { stdout: addOut, stderr: addErr } = await runP4Command(`add "${localPath}"`, client);
+      const addOutput = addOut + addErr;
+      if (addOutput.includes('opened for add') || addOutput.includes('currently opened')) {
+        results.push({ file: baseName, success: true, localPath, depotTarget, client });
+      } else {
+        results.push({ file: baseName, success: false, error: addOutput.trim() || 'p4 add failed' });
+      }
+    } catch (error) {
+      results.push({ file: baseName, success: false, error: error.message });
+    }
+  }
+  return { success: true, results };
 });
 
 // Bulk add files to P4

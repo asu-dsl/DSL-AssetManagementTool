@@ -26,6 +26,8 @@
 .ln-manage { background: transparent; border: none; color: var(--text-muted); cursor: pointer; display: flex; }
 .ln-manage:hover { color: var(--text); }
 .ln-list { flex: 1; overflow-y: auto; padding: 0 10px 10px; min-height: 0; }
+.ln-section { padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.ln-section-title { display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); padding: 8px 4px 4px; }
 .ln-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 13px; }
 .ln-row:hover { background: var(--surface-2); }
 .ln-row-active { background: var(--bg-primary); color: var(--primary); }

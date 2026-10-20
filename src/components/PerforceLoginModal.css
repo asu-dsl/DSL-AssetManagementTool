@@ -1,0 +1,106 @@
+.p4login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.p4login-card {
+  width: 380px;
+  max-width: 90vw;
+  background: var(--surface-1);
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.p4login-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+.p4login-close { background: transparent; border: none; color: var(--primary-fg); cursor: pointer; display: flex; }
+
+.p4login-sub { margin: 14px 16px 4px; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
+
+.p4login-error {
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  background: var(--bg-danger);
+  color: var(--danger);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.p4login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 16px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.p4login-field input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.p4login-field input.p4login-input-invalid { border-color: var(--danger); }
+.p4login-field input:focus { outline: none; border-color: var(--primary); }
+
+
+
+.p4login-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px;
+  margin-top: 6px;
+}
+
+.p4login-cancel {
+  padding: 10px 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.p4login-cancel:hover { background: var(--surface-2); color: var(--text); }
+
+.p4login-submit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  color: var(--primary-fg);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.p4login-submit:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.3);
+}
+.p4login-submit:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
