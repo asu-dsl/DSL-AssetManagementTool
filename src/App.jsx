@@ -10,8 +10,8 @@ import MetadataPanel from './components/MetadataPanel';
 import P4Panel from './components/P4Panel';
 import ProfileCard from './components/ProfileCard';
 import SettingsCard from './components/SettingsCard';
-import CollectionsCard from './components/CollectionsCard';
 import { ChevronRight, Download } from 'lucide-react';
+import { classifyAsset, extOf } from '../shared/assetClassification.js';
 import './App.css';
 
 class ErrorBoundary extends React.Component {
@@ -44,24 +44,10 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tga', 'tif', 'tiff', 'exr'];
-const MODEL_EXTS = ['obj', 'gltf', 'glb', 'fbx', 'dae', 'stl'];
-const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
-const AUDIO_EXTS = ['mp3', 'wav', 'ogg', 'flac'];
-
 const APP_VERSION = 'v0.3.0';
 
-function extOf(name) {
-  return (name.split('.').pop() || '').toLowerCase();
-}
-
 function typeFromName(name) {
-  const ext = extOf(name);
-  if (IMAGE_EXTS.includes(ext)) return 'image';
-  if (MODEL_EXTS.includes(ext)) return 'model';
-  if (VIDEO_EXTS.includes(ext)) return 'video';
-  if (AUDIO_EXTS.includes(ext)) return 'audio';
-  return 'doc';
+  return classifyAsset(name).category;
 }
 
 function toAsset(item) {
@@ -115,15 +101,37 @@ function PackageInfo({ meta }) {
   );
 }
 
-function ConfirmDialog({ open, message, confirmLabel, onConfirm, onCancel }) {
+function ConfirmDialog({ open, message, confirmLabel, confirmTone, showDontAskAgain, onConfirm, onCancel }) {
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  const overlayMouseDownRef = useRef(false);
+
+  useEffect(() => { if (open) setDontAskAgain(false); }, [open]);
+
   if (!open) return null;
+
+  // Same fix as PerforceLoginModal: only close if both the press and the
+  // release landed directly on the backdrop, so selecting text in the
+  // message doesn't accidentally dismiss the dialog if the drag ends
+  // outside it.
+  const handleOverlayMouseDown = (e) => { overlayMouseDownRef.current = e.target === e.currentTarget; };
+  const handleOverlayMouseUp = (e) => {
+    if (overlayMouseDownRef.current && e.target === e.currentTarget) onCancel();
+    overlayMouseDownRef.current = false;
+  };
+
   return (
-    <div className="confirm-overlay" onClick={onCancel}>
+    <div className="confirm-overlay" onMouseDown={handleOverlayMouseDown} onMouseUp={handleOverlayMouseUp}>
       <div className="confirm-card" onClick={(e) => e.stopPropagation()}>
         <div className="confirm-msg">{message}</div>
+        {showDontAskAgain && (
+          <label className="confirm-dontask">
+            <input type="checkbox" checked={dontAskAgain} onChange={(e) => setDontAskAgain(e.target.checked)} />
+            Don't show this again
+          </label>
+        )}
         <div className="confirm-actions">
           <button className="confirm-cancel" type="button" onClick={onCancel}>Cancel</button>
-          <button className="confirm-ok" type="button" onClick={onConfirm}>{confirmLabel || 'Confirm'}</button>
+          <button className={`confirm-ok${confirmTone === 'primary' ? ' confirm-ok-primary' : ''}`} type="button" onClick={() => onConfirm(dontAskAgain)}>{confirmLabel || 'Confirm'}</button>
         </div>
       </div>
     </div>
@@ -139,12 +147,8 @@ function App() {
   const [librarySide, setLibrarySide] = useState('resources');
   const [lastLibBySide, setLastLibBySide] = useState({});
   const [settingsReady, setSettingsReady] = useState(false);
-  const [officialCollections, setOfficialCollections] = useState([]);
-  const [myCollections, setMyCollections] = useState([]);
-  const [activeCollectionId, setActiveCollectionId] = useState(null);
-  const [collectionSideFilter, setCollectionSideFilter] = useState('all');
-  const [activeCollectionFolder, setActiveCollectionFolder] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  const [suppressFolderDownloadWarning, setSuppressFolderDownloadWarning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [currentPath, setCurrentPath] = useState(null);
   const [files, setFiles] = useState([]);
@@ -153,14 +157,19 @@ function App() {
   const [fileMetadata, setFileMetadata] = useState({});
   const [showP4Panel, setShowP4Panel] = useState(false);
   const [profile, setProfile] = useState({ displayName: '', key: '' });
-  const [p4, setP4] = useState({ available: false, connected: false, user: null, error: null, server: null });
+  const [p4, setP4] = useState({ available: false, connected: false, user: null, error: null, server: null, client: null, clients: [], root: null });
   const [p4LoginDismissed, setP4LoginDismissed] = useState(false);
   // Read independently of login state — p4 info omits the server address
   // when not authenticated, which is exactly when the login form needs it.
   const [p4ConfiguredServer, setP4ConfiguredServer] = useState(null);
+  // The single Art-depot workspace (client + its local root) and its pending
+  // files — shared by UploadPanel, P4Panel, and LibraryNav so a revert or
+  // submit done through one of them is reflected in the others, instead of
+  // each keeping its own copy that only updates after its own actions.
+  const [artDepot, setArtDepot] = useState({ client: null, root: null });
+  const [p4OpenedFiles, setP4OpenedFiles] = useState([]);
   const [leftW, setLeftW] = useState(320);
   const [rightW, setRightW] = useState(372);
-  const [leftSplit, setLeftSplit] = useState(0.5);
   const [rightSplit, setRightSplit] = useState(0.4);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
@@ -220,13 +229,56 @@ function App() {
     finally { setScanning(false); }
   }, [libraries]);
 
+  // Single source of truth for P4 connection/workspace info — pulls
+  // client/clients/root into the same `p4` state the connection badge reads,
+  // so P4Panel/MetadataPanel can consume it as a prop instead of each
+  // re-fetching it themselves.
+  const fetchP4Info = useCallback(async () => {
+    const info = await window.electron.p4GetInfo();
+    if (info && info.success) {
+      setP4({
+        available: true,
+        connected: !!info.connected,
+        user: info.user,
+        error: info.sessionError || null,
+        server: info.server || null,
+        client: info.client || null,
+        clients: info.clients || [],
+        root: info.root || null,
+      });
+    }
+    return info;
+  }, []);
+
+  // Resolves (or creates, on a machine that's never touched P4V) the one
+  // workspace mapped to the Art depot, and refreshes its pending-files list.
+  // This is the single place that call happens — UploadPanel, P4Panel, and
+  // LibraryNav all read the results as props and call this after any action
+  // that can change them (upload, revert, submit), instead of each keeping
+  // an independent copy that only knows about its own actions.
+  const refreshP4Opened = useCallback(async () => {
+    if (!window.electron) return;
+    try {
+      const clientRes = await window.electron.p4ResolveArtClient();
+      if (!clientRes || !clientRes.success) {
+        setArtDepot({ client: null, root: null });
+        setP4OpenedFiles([]);
+        return;
+      }
+      setArtDepot({ client: clientRes.client, root: clientRes.root || null });
+      const opened = await window.electron.p4GetOpened(clientRes.client);
+      if (opened && opened.success) setP4OpenedFiles(opened.files || []);
+    } catch { /* ignore — keep last known state */ }
+  }, []);
+
+  useEffect(() => { refreshP4Opened(); }, [refreshP4Opened]);
+
   useEffect(() => {
     (async () => {
       try {
         const res = await window.electron.profileLoad();
         if (res && res.success && res.profile) {
           setProfile(res.profile);
-          if (Array.isArray(res.profile.myCollections)) setMyCollections(res.profile.myCollections);
         }
       } catch (e) { console.error('profileLoad failed', e); }
       try {
@@ -235,7 +287,7 @@ function App() {
           setLibraries(s.settings.libraries || []);
           if (s.settings.librarySide) setLibrarySide(s.settings.librarySide);
           if (s.settings.lastLibBySide) setLastLibBySide(s.settings.lastLibBySide);
-          if (Array.isArray(s.settings.officialCollections)) setOfficialCollections(s.settings.officialCollections);
+          if (s.settings.suppressFolderDownloadWarning) setSuppressFolderDownloadWarning(true);
         }
       } catch (e) { console.error('settingsLoad failed', e); }
       finally { setSettingsReady(true); }
@@ -253,9 +305,8 @@ function App() {
       try {
         const avail = await window.electron.p4CheckAvailable();
         if (avail && avail.available) {
-          const info = await window.electron.p4GetInfo();
-          if (info && info.success) setP4({ available: true, connected: !!info.connected, user: info.user, error: info.sessionError || null, server: info.server || null });
-          else setP4({ available: true, connected: false, user: null, error: null, server: null });
+          const info = await fetchP4Info();
+          if (!info || !info.success) setP4({ available: true, connected: false, user: null, error: null, server: null, client: null, clients: [], root: null });
           const configuredServer = await window.electron.p4GetConfiguredServer();
           if (configuredServer && configuredServer.success) setP4ConfiguredServer(configuredServer.server);
         }
@@ -292,7 +343,6 @@ function App() {
   }, [p4.connected]);
 
   useEffect(() => {
-    if (activeCollectionId) return;
     if (!currentPath) { setFiles([]); return; }
     let active = true;
     (async () => {
@@ -348,7 +398,7 @@ function App() {
       }
     })();
     return () => { active = false; };
-  }, [currentPath, activeCollectionId, librarySide, libIndex]);
+  }, [currentPath, librarySide, libIndex]);
 
   useEffect(() => {
     const zips = files.filter((f) => f.type === 'zipAsset');
@@ -375,7 +425,6 @@ function App() {
   // When the active side changes (or libraries load), scope to a library's top folder:
   // the last one opened on that side, otherwise the first library on that side.
   useEffect(() => {
-    if (activeCollectionId) return;
     const sideLibs = libraries.filter((l) => (l.side || 'resources') === librarySide);
     if (sideLibs.length === 0) return;
     const inSide = currentPath && sideLibs.some((l) => currentPath === l.root || currentPath.startsWith(l.root));
@@ -383,7 +432,7 @@ function App() {
     const last = lastLibBySide[librarySide];
     const target = (last && sideLibs.some((l) => l.root === last)) ? last : sideLibs[0].root;
     if (target) setCurrentPath(target);
-  }, [librarySide, libraries, currentPath, lastLibBySide, activeCollectionId]);
+  }, [librarySide, libraries, currentPath, lastLibBySide]);
 
   // Persist active side + last-opened library per side across restarts.
   useEffect(() => {
@@ -391,121 +440,15 @@ function App() {
     window.electron.settingsSave({ librarySide, lastLibBySide }).catch(() => {});
   }, [librarySide, lastLibBySide, settingsReady]);
 
-  useEffect(() => {
-    if (!settingsReady) return;
-    window.electron.settingsSave({ officialCollections }).catch(() => {});
-  }, [officialCollections, settingsReady]);
-
-  useEffect(() => {
-    if (!settingsReady) return;
-    window.electron.profileSave({ key: profile.key, myCollections }).catch(() => {});
-  }, [myCollections, settingsReady, profile.key]);
-
-  useEffect(() => {
-    if (!activeCollectionId) return;
-    const col = [...officialCollections, ...myCollections].find((c) => c.id === activeCollectionId);
-    const members = (col && col.members) ? col.members : [];
-    const bySide = collectionSideFilter === 'all' ? members : members.filter((m) => (m.side || 'resources') === collectionSideFilter);
-    const byFolder = activeCollectionFolder ? bySide.filter((m) => m.folder === activeCollectionFolder) : bySide;
-    setFiles(byFolder.map((m) => ({ name: m.name, path: m.path, ext: m.ext || 'zip', type: m.type || 'zipAsset', side: m.side })));
-  }, [activeCollectionId, collectionSideFilter, activeCollectionFolder, officialCollections, myCollections]);
-
   const handleSelectScope = useCallback((path) => {
-    setActiveCollectionId(null);
-    setActiveCollectionFolder(null);
     setCurrentPath(path);
     const lib = libraries.find((l) => l.root === path);
     if (lib) setLastLibBySide((prev) => ({ ...prev, [lib.side || 'resources']: path }));
   }, [libraries]);
 
   const handleSideChange = useCallback((sd) => {
-    setActiveCollectionId(null);
-    setActiveCollectionFolder(null);
     setLibrarySide(sd);
   }, []);
-
-  const newCol = (name) => ({ id: 'col_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, members: [], folders: [] });
-  const handleCreateOfficial = useCallback((name) => setOfficialCollections((prev) => [...prev, newCol(name)]), []);
-  const handleCreateMine = useCallback((name) => setMyCollections((prev) => [...prev, newCol(name)]), []);
-  const handleSelectCollection = useCallback((id) => { setActiveCollectionId(id); setActiveCollectionFolder(null); }, []);
-  const handleSelectCollectionFolder = useCallback((colId, folderId) => { setActiveCollectionId(colId); setActiveCollectionFolder(folderId); }, []);
-  const handleAddFolder = useCallback((colId, name) => {
-    const fid = 'fld_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-    const upd = (list) => list.map((c) => (c.id === colId ? { ...c, folders: [...(c.folders || []), { id: fid, name }] } : c));
-    setOfficialCollections((prev) => upd(prev));
-    setMyCollections((prev) => upd(prev));
-  }, []);
-  const handleDropToCollection = useCallback((colId, folderId, asset) => {
-    const member = { path: asset.path, name: asset.name, ext: asset.ext || 'zip', type: asset.type || 'zipAsset', side: asset.side || librarySide, folder: folderId || null };
-    const upd = (list) => list.map((c) => {
-      if (c.id !== colId) return c;
-      const others = (c.members || []).filter((m) => m.path !== member.path);
-      return { ...c, members: [...others, member] };
-    });
-    setOfficialCollections((prev) => upd(prev));
-    setMyCollections((prev) => upd(prev));
-  }, [librarySide]);
-
-  const handleRemoveFromCollection = useCallback((colId, memberPath) => {
-    const upd = (list) => list.map((c) => (c.id === colId ? { ...c, members: (c.members || []).filter((m) => m.path !== memberPath) } : c));
-    setOfficialCollections((prev) => upd(prev));
-    setMyCollections((prev) => upd(prev));
-  }, []);
-
-  const handleRemoveFromFolder = useCallback((colId, memberPath) => {
-    const upd = (list) => list.map((c) => (c.id === colId ? { ...c, members: (c.members || []).map((m) => (m.path === memberPath ? { ...m, folder: null } : m)) } : c));
-    setOfficialCollections((prev) => upd(prev));
-    setMyCollections((prev) => upd(prev));
-  }, []);
-
-  const handleSetCover = useCallback(async (colId) => {
-    try {
-      if (!window.electron.selectImage) { alert('Restart the app to enable custom covers.'); return; }
-      const path = await window.electron.selectImage();
-      if (!path) return;
-      const upd = (list) => list.map((c) => (c.id === colId ? { ...c, cover: { type: 'image', path } } : c));
-      setOfficialCollections((prev) => upd(prev));
-      setMyCollections((prev) => upd(prev));
-    } catch (e) { console.error('set cover failed', e); }
-  }, []);
-
-  const handleToggleLock = useCallback((colId) => {
-    const upd = (list) => list.map((c) => (c.id === colId ? { ...c, locked: !c.locked } : c));
-    setOfficialCollections((prev) => upd(prev));
-    setMyCollections((prev) => upd(prev));
-  }, []);
-
-  const handleAssetContext = useCallback((file) => {
-    if (!activeCollectionId) return;
-    const col = [...officialCollections, ...myCollections].find((c) => c.id === activeCollectionId);
-    if (!col) return;
-    if (col.locked) return;
-    if (activeCollectionFolder) {
-      const folder = (col.folders || []).find((f) => f.id === activeCollectionFolder);
-      const fname = folder ? folder.name : 'this folder';
-      setConfirm({
-        message: 'Remove "' + file.name + '" from folder "' + fname + '"? It stays in the collection.',
-        confirmLabel: 'Remove from folder',
-        onConfirm: () => { handleRemoveFromFolder(activeCollectionId, file.path); },
-      });
-    } else {
-      setConfirm({
-        message: 'Remove "' + file.name + '" from "' + col.name + '"?',
-        confirmLabel: 'Remove from collection',
-        onConfirm: () => {
-          handleRemoveFromCollection(activeCollectionId, file.path);
-          if (previewFile && previewFile.path === file.path) setPreviewFile(null);
-        },
-      });
-    }
-  }, [activeCollectionId, activeCollectionFolder, officialCollections, myCollections, previewFile, handleRemoveFromCollection, handleRemoveFromFolder]);
-  const handleAddToCollection = useCallback((colId) => {
-    if (!previewFile) return;
-    const member = { path: previewFile.path, name: previewFile.name, ext: previewFile.ext, type: previewFile.type, side: librarySide };
-    const addTo = (list) => list.map((c) => (c.id === colId && !(c.members || []).some((m) => m.path === member.path) ? { ...c, members: [...(c.members || []), member] } : c));
-    setOfficialCollections((prev) => addTo(prev));
-    setMyCollections((prev) => addTo(prev));
-  }, [previewFile, librarySide]);
 
   const persistProfile = useCallback(async (partial) => {
     setProfile((prev) => ({ ...prev, ...partial }));
@@ -611,7 +554,6 @@ function App() {
         if (target < 372 - 60) setRightCollapsed(true);
         else { setRightCollapsed(false); setRightW(clamp(target, 372, 640)); }
       }
-      else if (d.type === 'splitL') setLeftSplit(clamp(d.val + (e.clientY - d.y) / d.h, 0.15, 0.85));
       else if (d.type === 'splitR') setRightSplit(clamp(d.val + (e.clientY - d.y) / d.h, 0.15, 0.85));
     };
     const onUp = () => { dragRef.current = null; document.body.style.userSelect = ''; };
@@ -641,17 +583,55 @@ function App() {
   // previewFile.path locally (for depot assets, that's the temp file p4
   // print already fetched for the preview itself) — so download is just
   // "ask where to save it, then copy," identical for local and depot assets.
-  const handleDownloadAsset = useCallback(async () => {
-    if (!previewFile) return;
+  const performFolderDownload = useCallback(async () => {
     try {
-      const r = await window.electron.downloadAsset({ sourcePath: previewFile.path, suggestedName: previewFile.name });
-      if (r && !r.success && !r.canceled) {
+      const r = await window.electron.downloadFolder({ folderPath: currentPath });
+      if (r && r.success) {
+        if (r.errors && r.errors.length > 0) {
+          alert(`Downloaded ${r.downloaded} of ${r.total} file(s) to:\n${r.destFolder}\n\n${r.errors.length} file(s) failed:\n` + r.errors.join('\n'));
+        }
+      } else if (r && !r.canceled) {
         alert('Download failed: ' + (r.error || 'unknown error'));
       }
     } catch (e) {
       alert('Download failed: ' + (e && e.message ? e.message : e));
     }
-  }, [previewFile]);
+  }, [currentPath]);
+
+  const handleDownloadAsset = useCallback(async () => {
+    if (previewFile) {
+      try {
+        const r = await window.electron.downloadAsset({ sourcePath: previewFile.path, suggestedName: previewFile.name });
+        if (r && !r.success && !r.canceled) {
+          alert('Download failed: ' + (r.error || 'unknown error'));
+        }
+      } catch (e) {
+        alert('Download failed: ' + (e && e.message ? e.message : e));
+      }
+      return;
+    }
+
+    if (!currentPath) return;
+    if (suppressFolderDownloadWarning) {
+      performFolderDownload();
+      return;
+    }
+
+    const folderName = currentPath.split(/[\\/]+/).filter(Boolean).pop() || currentPath;
+    setConfirm({
+      message: `You are about to download an entire folder ("${folderName}"). Are you sure you want to proceed?`,
+      confirmLabel: 'Download Folder',
+      confirmTone: 'primary',
+      showDontAskAgain: true,
+      onConfirm: (dontAskAgain) => {
+        if (dontAskAgain) {
+          setSuppressFolderDownloadWarning(true);
+          window.electron.settingsSave({ suppressFolderDownloadWarning: true }).catch(() => {});
+        }
+        performFolderDownload();
+      },
+    });
+  }, [previewFile, currentPath, suppressFolderDownloadWarning, performFolderDownload]);
 
   // Fetch a depot asset's .dslmeta.json sidecar on demand — only when it's
   // actually opened, never eagerly for a whole folder listing, matching how
@@ -672,7 +652,7 @@ function App() {
     return () => { active = false; };
   }, [previewFile, fileMetadata]);
 
-  const activeLib = (!activeCollectionId && currentPath)
+  const activeLib = currentPath
     ? (currentPath.startsWith('//')
       ? P4_ART_DEPOT
       : libraries.find((l) => currentPath === l.root || currentPath.startsWith(l.root + '\\') || currentPath.startsWith(l.root + '/')))
@@ -688,7 +668,7 @@ function App() {
   })();
 
   const startCol = (type) => (e) => { e.preventDefault(); const cur = type === 'colL' ? (leftCollapsed ? 0 : leftW) : (rightCollapsed ? 0 : rightW); dragRef.current = { type, x: e.clientX, val: cur }; document.body.style.userSelect = 'none'; };
-  const startSplit = (type) => (e) => { e.preventDefault(); const h = (e.currentTarget.parentElement && e.currentTarget.parentElement.clientHeight) || 1; dragRef.current = { type, y: e.clientY, val: type === 'splitL' ? leftSplit : rightSplit, h }; document.body.style.userSelect = 'none'; };
+  const startSplit = (type) => (e) => { e.preventDefault(); const h = (e.currentTarget.parentElement && e.currentTarget.parentElement.clientHeight) || 1; dragRef.current = { type, y: e.clientY, val: rightSplit, h }; document.body.style.userSelect = 'none'; };
 
   return (
     <ErrorBoundary>
@@ -713,9 +693,8 @@ function App() {
               onEditDisplayName={(v) => persistProfile({ displayName: v })}
               onConnectPerforce={async () => {
                 try {
-                  const i = await window.electron.p4GetInfo();
-                  if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user, error: i.sessionError || null, server: i.server || null });
-                  else alert('Perforce not connected - check that p4 is configured for this workspace.');
+                  const i = await fetchP4Info();
+                  if (!i || !i.success) alert('Perforce not connected - check that p4 is configured for this workspace.');
                 } catch (e) { alert('Perforce check failed.'); }
               }}
               onConnectCoda={() => alert('Coda connection - coming in a later pass.')}
@@ -727,9 +706,18 @@ function App() {
 
         <div className="app2-left">
           <div className="upload-host">
-            <UploadPanel currentPath={currentPath} />
+            <UploadPanel
+              currentPath={currentPath}
+              onOpenP4Panel={() => setShowP4Panel(true)}
+              openedFiles={p4OpenedFiles}
+              onRefreshOpened={refreshP4Opened}
+              p4={p4}
+              onRefreshConnection={fetchP4Info}
+              artDepotClient={artDepot.client}
+              artDepotRoot={artDepot.root}
+            />
           </div>
-          <div className="browser-host" style={{ flex: leftSplit + ' 1 0' }}>
+          <div className="browser-host">
             <LibraryNav
               libraries={libraries}
               side={librarySide}
@@ -742,28 +730,6 @@ function App() {
               scanning={scanning}
             />
           </div>
-          <div className="rz-row" onMouseDown={startSplit('splitL')} />
-          {/* <div className="collections-host" style={{ flex: (1 - leftSplit) + ' 1 0' }}> */}
-            {/* TODO: Upload to p4 repo from local device */}
-
-            {/* Temporarily Removed, will integrate UI into asset navigation panel */}
-            {/* <CollectionsCard
-              official={officialCollections}
-              mine={myCollections}
-              activeId={activeCollectionId}
-              activeFolder={activeCollectionFolder}
-              sideFilter={collectionSideFilter}
-              onSideFilter={setCollectionSideFilter}
-              onSelect={handleSelectCollection}
-              onSelectFolder={handleSelectCollectionFolder}
-              onDrop={handleDropToCollection}
-              onAddFolder={handleAddFolder}
-              onSetCover={handleSetCover}
-              onToggleLock={handleToggleLock}
-              onCreateOfficial={handleCreateOfficial}
-              onCreateMine={handleCreateMine}
-            /> */}
-          {/* </div> */}
           <div className="app-version">DSL Asset Manager {APP_VERSION}</div>
         </div>
 
@@ -796,7 +762,6 @@ function App() {
                 selectedPath={previewFile ? (previewFile.sourcePath || previewFile.path) : null}
                 onSelectAsset={handleSelectAsset}
                 onOpenAsset={handleOpenAsset}
-                onContext={handleAssetContext}
               />
             </div>
           </div>
@@ -815,11 +780,11 @@ function App() {
                 <button
                   className="dl-btn"
                   type="button"
-                  disabled={!previewFile}
+                  disabled={!previewFile && !currentPath}
                   onClick={handleDownloadAsset}
                 >
                   <Download size={14} />
-                  {previewFile ? 'Download Asset' : 'Select an asset to download'}
+                  {previewFile ? 'Download Asset' : currentPath ? 'Download Folder' : 'Download a folder or asset'}
                 </button>
               </div>
             </div>
@@ -833,7 +798,8 @@ function App() {
                     currentFile={previewFile}
                     metadata={previewFile ? fileMetadata[previewFile.sourcePath || previewFile.path] : null}
                     onMetadataUpdate={handleMetadataUpdate}
-                    onOpenP4Panel={() => setShowP4Panel(true)}
+                    p4={p4}
+                    onRefreshOpened={refreshP4Opened}
                   />
                 </div>
               </div>
@@ -842,7 +808,17 @@ function App() {
         </div>
       </div>
 
-      <P4Panel isOpen={showP4Panel} onClose={() => setShowP4Panel(false)} currentFolder={currentPath} />
+      <P4Panel
+        isOpen={showP4Panel}
+        onClose={() => setShowP4Panel(false)}
+        currentFolder={currentPath}
+        p4={p4}
+        onRefreshConnection={fetchP4Info}
+        artDepotClient={artDepot.client}
+        artDepotRoot={artDepot.root}
+        openedFiles={p4OpenedFiles}
+        onRefreshOpened={refreshP4Opened}
+      />
       <PerforceLoginModal
         open={p4.available && !p4.connected && !p4LoginDismissed}
         defaultServer={p4ConfiguredServer || p4.server}
@@ -867,10 +843,7 @@ function App() {
         scanInfo={scanInfo}
         p4={p4}
         onTestPerforce={async () => {
-          try {
-            const i = await window.electron.p4GetInfo();
-            if (i && i.success) setP4({ available: true, connected: !!i.connected, user: i.user, error: i.sessionError || null, server: i.server || null });
-          } catch (e) { /* ignore */ }
+          try { await fetchP4Info(); } catch (e) { /* ignore */ }
         }}
         onOpenP4Login={() => setP4LoginDismissed(false)}
       />
@@ -878,8 +851,10 @@ function App() {
         open={!!confirm}
         message={confirm && confirm.message}
         confirmLabel={confirm && confirm.confirmLabel}
+        confirmTone={confirm && confirm.confirmTone}
+        showDontAskAgain={confirm && confirm.showDontAskAgain}
         onCancel={() => setConfirm(null)}
-        onConfirm={() => { if (confirm && confirm.onConfirm) confirm.onConfirm(); setConfirm(null); }}
+        onConfirm={(dontAskAgain) => { if (confirm && confirm.onConfirm) confirm.onConfirm(dontAskAgain); setConfirm(null); }}
       />
     </ErrorBoundary>
   );

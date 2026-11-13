@@ -7,7 +7,9 @@ import {
   FileText,
   Folder,
   File,
+  Palette,
 } from 'lucide-react';
+import { classifyAsset } from '../../shared/assetClassification.js';
 import './LibraryGrid.css';
 
 const TYPE_ICONS = {
@@ -15,13 +17,14 @@ const TYPE_ICONS = {
   model: Box,
   video: Film,
   audio: Music,
+  material: Palette,
   doc: FileText,
   folder: Folder,
   folderAsset: Folder,
   zipAsset: Box,
 };
 
-function Thumb({ path, ext, type }) {
+function Thumb({ path, type }) {
   const [src, setSrc] = useState(null);
   const [visible, setVisible] = useState(false);
   const ref = useRef(null);
@@ -48,20 +51,25 @@ function Thumb({ path, ext, type }) {
           const res = await window.electron.readZipPreview(path);
           if (cancelled) return;
           if (res && res.success && res.data) setSrc(`data:${res.mime || 'image/png'};base64,${res.data}`);
-        } else if (window.electron.readFile) {
+          return;
+        }
+        const cls = classifyAsset(path);
+        if (cls.nativeMime && window.electron.readFile) {
           const res = await window.electron.readFile(path);
           if (cancelled) return;
-          if (res && res.success && res.data) {
-            const m = ext ? String(ext).replace(/^\./, '') : 'png';
-            setSrc(`data:image/${m || 'png'};base64,${res.data}`);
-          }
+          if (res && res.success && res.data) setSrc(`data:${cls.nativeMime};base64,${res.data}`);
+        } else if (cls.needsConversion && window.electron.convertImagePreview) {
+          const res = await window.electron.convertImagePreview(path, cls.ext);
+          if (cancelled) return;
+          if (res && res.success && res.data) setSrc(`data:${res.mime};base64,${res.data}`);
         }
+        // else: not previewable yet (e.g. EXR) — keep the placeholder icon.
       } catch {
         /* keep placeholder */
       }
     })();
     return () => { cancelled = true; };
-  }, [visible, path, ext, type]);
+  }, [visible, path, type]);
 
   return (
     <div ref={ref} style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -84,11 +92,10 @@ function AssetCard({ file, selected, onSelectAsset, onOpenAsset, onContext }) {
 
   const renderThumb = () => {
     if (file && (file.type === 'image' || file.type === 'zipAsset')) {
-      return <Thumb path={file.path} ext={file.ext} type={file.type} />;
+      return <Thumb path={file.path} type={file.type} />;
     }
     if (file && file.type === 'folderAsset' && file.preview) {
-      const pe = (String(file.preview).split('.').pop() || 'png');
-      return <Thumb path={file.preview} ext={pe} type="image" />;
+      return <Thumb path={file.preview} type="image" />;
     }
     const Icon = TYPE_ICONS[file && file.type] || File;
     return <Icon size={30} color="var(--text-faint)" />;

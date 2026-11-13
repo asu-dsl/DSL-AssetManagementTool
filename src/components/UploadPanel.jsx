@@ -1,39 +1,49 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Upload, FilePlus, FileEdit, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Upload, GitBranch, RefreshCw, Check } from 'lucide-react';
 import { P4_ART_DEPOT } from './LibraryNav';
 import './UploadPanel.css';
 
-function actionIcon(action) {
-  if (action === 'add') return <FilePlus size={14} className="action-add" />;
-  if (action === 'edit') return <FileEdit size={14} className="action-edit" />;
-  if (action === 'delete') return <Trash2 size={14} className="action-delete" />;
-  return <FilePlus size={14} />;
-}
-
-function UploadPanel({ currentPath }) {
-  const [openedFiles, setOpenedFiles] = useState([]);
-  const [showModal, setShowModal] = useState(false);
+// `openedFiles` and `onRefreshOpened` come from App.jsx, which is the single
+// place that resolves the Art-depot workspace and fetches its pending files
+// — shared with P4Panel so a revert or submit done through the P4 panel is
+// reflected here too, instead of this panel only knowing about its own
+// uploads. `p4`/`onRefreshConnection`/`artDepotClient` back the connection
+// control that used to live in the metadata editor — it fits better here,
+// next to the actual Upload-to-Perforce action.
+//
+// The status/pending control is a single, always-rendered element that opens
+// the Perforce panel on click, in every connection/pending state — it used
+// to be two separate controls (a status header that only toggled an inline
+// detail dropdown, and a "pending changes" button that only existed once
+// something was pending), which left no way to open the Perforce panel at
+// all with a clean workspace, and left the user unsure which of the two
+// similar-looking rows actually opened it.
+function UploadPanel({ currentPath, onOpenP4Panel, openedFiles, onRefreshOpened, p4, onRefreshConnection, artDepotClient, artDepotRoot }) {
   const [uploading, setUploading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [description, setDescription] = useState('');
   const [statusMessage, setStatusMessage] = useState(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [justRefreshed, setJustRefreshed] = useState(false);
+  const refreshDoneTimer = useRef(null);
 
-  // Always resolve the Art-depot workspace explicitly rather than trusting
-  // the app's shared "active client" — other features (reconnecting
-  // Perforce, switching workspaces elsewhere) reset that shared value for
-  // reasons unrelated to this panel, which would otherwise show pending
-  // changes for the wrong workspace or none at all.
-  const refreshOpened = useCallback(async () => {
-    if (!window.electron) return;
+  const p4Available = p4 && p4.available;
+  const p4Connected = p4 && p4.connected;
+  const pendingCount = openedFiles ? openedFiles.length : 0;
+
+  useEffect(() => () => clearTimeout(refreshDoneTimer.current), []);
+
+  const handleRefreshConnection = async (e) => {
+    e.stopPropagation();
+    setIsRefreshing(true);
     try {
-      const clientRes = await window.electron.p4ResolveArtClient();
-      if (!clientRes || !clientRes.success) { setOpenedFiles([]); return; }
-      const r = await window.electron.p4GetOpened(clientRes.client);
-      if (r && r.success) setOpenedFiles(r.files || []);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => { refreshOpened(); }, [refreshOpened]);
+      if (onRefreshConnection) await onRefreshConnection();
+      if (onRefreshOpened) await onRefreshOpened();
+      setJustRefreshed(true);
+      clearTimeout(refreshDoneTimer.current);
+      refreshDoneTimer.current = setTimeout(() => setJustRefreshed(false), 2000);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleUploadClick = async () => {
     // Artists only ever upload into the Art depot — use wherever they're
@@ -52,8 +62,11 @@ function UploadPanel({ currentPath }) {
         setStatusMessage(failed.length > 0
           ? { type: 'error', text: `${failed.length} file(s) failed: ${failed.map((f) => `${f.file} (${f.error})`).join('; ')}` }
           : null);
-        await refreshOpened();
-        setShowModal(true);
+        if (onRefreshOpened) await onRefreshOpened();
+        // Review and submit the upload through the P4 panel — it already
+        // shows the same pending-changes list, so there's no need for a
+        // second, separate "pending changes" window here.
+        if (onOpenP4Panel) onOpenP4Panel();
       } else {
         setStatusMessage({ type: 'error', text: (r && r.error) || 'Upload failed' });
       }
@@ -64,95 +77,69 @@ function UploadPanel({ currentPath }) {
     }
   };
 
-  const handleSubmit = async () => {
-    if (!description.trim()) {
-      setStatusMessage({ type: 'error', text: 'Enter a changelist description before submitting.' });
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const clientRes = await window.electron.p4ResolveArtClient();
-      if (!clientRes || !clientRes.success) {
-        setStatusMessage({ type: 'error', text: (clientRes && clientRes.error) || 'Could not resolve the Art depot workspace.' });
-        return;
-      }
-      const r = await window.electron.p4Submit({ description, client: clientRes.client });
-      if (r && r.success) {
-        setDescription('');
-        setShowModal(false);
-        setStatusMessage(null);
-        await refreshOpened();
-      } else {
-        setStatusMessage({ type: 'error', text: (r && r.error) || 'Submit failed' });
-      }
-    } catch (e) {
-      setStatusMessage({ type: 'error', text: e.message || 'Submit failed' });
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const badgeText = p4Connected ? '● Connected' : '○ Disconnected';
+
+  const secondaryText = !p4Connected
+    ? 'Click to reconnect'
+    : pendingCount > 0
+      ? `${pendingCount} pending change${pendingCount === 1 ? '' : 's'}`
+      : 'Up to date';
+
+  const ariaStatus = !p4Connected
+    ? 'Disconnected'
+    : pendingCount > 0
+      ? `Connected, ${pendingCount} pending change${pendingCount === 1 ? '' : 's'}`
+      : 'Connected, up to date';
+
+  const tooltip = p4Available
+    ? `User: ${p4.user}\nWorkspace: ${artDepotClient || p4.client}\nRoot: ${artDepotRoot || '—'}\nServer: ${p4.server}`
+    : undefined;
 
   return (
     <div className="up-host">
+      {p4Available && (
+        <div
+          className={`up-p4-control ${p4Connected ? 'connected' : 'disconnected'}`}
+          role="button"
+          tabIndex={0}
+          onClick={onOpenP4Panel}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              if (onOpenP4Panel) onOpenP4Panel();
+            }
+          }}
+          title={tooltip}
+          aria-label={`Perforce: ${ariaStatus} — open Perforce panel`}
+        >
+          <GitBranch size={14} />
+          <div className="up-p4-text-stack">
+            <div className="up-p4-line1">
+              <span className="up-p4-label-text">Perforce</span>
+              <span className={`up-p4-badge ${p4Connected ? 'connected' : 'disconnected'}`}>{badgeText}</span>
+            </div>
+            <span className="up-p4-control-text">{secondaryText}</span>
+          </div>
+          <button
+            type="button"
+            className="up-p4-refresh"
+            onClick={handleRefreshConnection}
+            disabled={isRefreshing}
+            aria-label="Refresh Perforce connection"
+            title="Refresh connection"
+          >
+            {justRefreshed ? <Check size={12} /> : <RefreshCw size={12} className={isRefreshing ? 'spinning' : ''} />}
+          </button>
+        </div>
+      )}
+
       <button className="up-btn" type="button" onClick={handleUploadClick} disabled={uploading}>
         <Upload size={14} />
-        {uploading ? 'Uploading…' : 'Upload to Perforce'}
+        {uploading ? 'Uploading…' : 'Upload'}
       </button>
 
-      {openedFiles.length > 0 && (
-        <button className="up-pending" type="button" onClick={() => setShowModal(true)}>
-          {openedFiles.length} pending change{openedFiles.length === 1 ? '' : 's'}
-        </button>
-      )}
-
-      {statusMessage && !showModal && (
+      {statusMessage && (
         <div className={`up-status ${statusMessage.type}`}>{statusMessage.text}</div>
-      )}
-
-      {showModal && (
-        <div className="up-modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="up-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="up-modal-header">
-              <span>Pending Changes ({openedFiles.length})</span>
-              <button type="button" className="up-modal-close" onClick={() => setShowModal(false)} aria-label="close">
-                <X size={16} />
-              </button>
-            </div>
-
-            {statusMessage && <div className={`up-status ${statusMessage.type}`}>{statusMessage.text}</div>}
-
-            <div className="up-file-list">
-              {openedFiles.length === 0 && <div className="up-empty">No pending changes</div>}
-              {openedFiles.map((f, i) => (
-                <div key={i} className="up-file-row">
-                  {actionIcon(f.action)}
-                  <span className="up-file-name" title={f.depotFile}>{f.depotFile.split('/').pop()}</span>
-                  <span className={`up-file-action ${f.action}`}>{f.action}</span>
-                </div>
-              ))}
-            </div>
-
-            <textarea
-              className="up-desc"
-              placeholder="Changelist description…"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-            />
-
-            <div className="up-modal-footer">
-              <button type="button" className="up-draft-btn" onClick={() => setShowModal(false)}>Save as Draft</button>
-              <button
-                type="button"
-                className="up-submit-btn"
-                onClick={handleSubmit}
-                disabled={submitting || openedFiles.length === 0 || !description.trim()}
-              >
-                {submitting ? 'Submitting…' : 'Submit'}
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

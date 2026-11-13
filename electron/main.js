@@ -1,13 +1,14 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'path';
 import os from 'os';
-import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as perforceService from './services/perforce.js';
+import * as zipService from './services/zip.js';
+import * as imageConvertService from './services/imageConvert.js';
+import { classifyAsset } from '../shared/assetClassification.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -16,8 +17,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow;
-let activeWatcher = null;
-let watchedPath = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -55,43 +54,6 @@ app.on('activate', () => {
   }
 });
 
-// File System Watcher
-function setupWatcher(dirPath) {
-  // Clean up existing watcher
-  if (activeWatcher) {
-    activeWatcher.close();
-    activeWatcher = null;
-  }
-  
-  watchedPath = dirPath;
-  
-  try {
-    // Use recursive watching for the directory
-    activeWatcher = fsSync.watch(dirPath, { recursive: true }, (eventType, filename) => {
-      // Debounce rapid changes
-      if (activeWatcher._debounceTimeout) {
-        clearTimeout(activeWatcher._debounceTimeout);
-      }
-      
-      activeWatcher._debounceTimeout = setTimeout(() => {
-        console.log(`File system change detected: ${eventType} - ${filename}`);
-        // Notify renderer of the change
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('file-system-changed', {
-            eventType,
-            filename,
-            directory: dirPath
-          });
-        }
-      }, 300); // 300ms debounce
-    });
-    
-    console.log('File watcher set up for:', dirPath);
-  } catch (error) {
-    console.error('Failed to set up file watcher:', error);
-  }
-}
-
 // IPC Handlers
 ipcMain.handle('select-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -103,84 +65,6 @@ ipcMain.handle('select-folder', async () => {
   }
   
   return result.filePaths[0];
-});
-
-ipcMain.handle('read-directory-tree', async (event, dirPath) => {
-  // Set up file watcher for this directory
-  setupWatcher(dirPath);
-  
-  try {
-    async function buildTree(currentPath, name = path.basename(currentPath)) {
-      const stats = await fs.stat(currentPath);
-      
-      if (stats.isFile()) {
-        return {
-          name,
-          path: currentPath,
-          type: 'file',
-          size: stats.size,
-          lastModified: stats.mtime.toISOString(),
-        };
-      }
-      
-      if (stats.isDirectory()) {
-        const entries = await fs.readdir(currentPath);
-        const children = [];
-        
-        for (const entry of entries) {
-          try {
-            const childPath = path.join(currentPath, entry);
-            const child = await buildTree(childPath, entry);
-            children.push(child);
-          } catch (err) {
-            console.error(`Error reading ${entry}:`, err.message);
-          }
-        }
-        
-        // Sort: folders first, then files
-        children.sort((a, b) => {
-          if (a.type === 'directory' && b.type === 'file') return -1;
-          if (a.type === 'file' && b.type === 'directory') return 1;
-          return a.name.localeCompare(b.name);
-        });
-        
-        return {
-          name,
-          path: currentPath,
-          type: 'directory',
-          children,
-        };
-      }
-    }
-    
-    return await buildTree(dirPath);
-  } catch (error) {
-    console.error('Error reading directory tree:', error);
-    throw error;
-  }
-});
-
-ipcMain.handle('save-json', async (event, data) => {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export Metadata',
-    defaultPath: `asset-metadata-${timestamp}.json`,
-    filters: [
-      { name: 'JSON Files', extensions: ['json'] },
-    ],
-  });
-  
-  if (result.canceled) {
-    return { success: false };
-  }
-  
-  try {
-    await fs.writeFile(result.filePath, JSON.stringify(data, null, 2), 'utf-8');
-    return { success: true, filePath: result.filePath };
-  } catch (error) {
-    console.error('Error saving JSON:', error);
-    return { success: false, error: error.message };
-  }
 });
 
 // Targeted download: by the time an asset is being previewed, its full
@@ -202,6 +86,66 @@ ipcMain.handle('download-asset', async (event, { sourcePath, suggestedName }) =>
   }
 });
 
+async function copyDirRecursive(src, dest) {
+  await fs.mkdir(dest, { recursive: true });
+  const entries = await fs.readdir(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) await copyDirRecursive(srcPath, destPath);
+    else await fs.copyFile(srcPath, destPath);
+  }
+}
+
+// Whole-folder download: for a local folder, a plain recursive copy. For a
+// depot folder, list every file under it in one call (p4 files foo/...)
+// and p4 print each one to the matching relative path — still no
+// workspace, still no full depot clone, just more files than the
+// single-asset case.
+ipcMain.handle('download-folder', async (event, { folderPath }) => {
+  const isDepot = folderPath.startsWith('//');
+  const folderName = folderPath.split(/[\\/]+/).filter(Boolean).pop() || 'download';
+
+  const picked = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a destination folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (picked.canceled || !picked.filePaths || picked.filePaths.length === 0) return { success: false, canceled: true };
+  const destFolder = path.join(picked.filePaths[0], folderName);
+
+  if (!isDepot) {
+    try {
+      await copyDirRecursive(folderPath, destFolder);
+      return { success: true, destFolder };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  const listed = await perforceService.listDepotFilesRecursive(folderPath, { user: p4Config.user });
+  if (!listed.success) return { success: false, error: listed.error };
+  if (listed.files.length === 0) return { success: false, error: 'This folder has no files to download.' };
+
+  const prefix = folderPath.replace(/\/+$/, '');
+  let downloaded = 0;
+  const errors = [];
+  for (const depotFile of listed.files) {
+    const relative = depotFile.slice(prefix.length).replace(/^\/+/, '');
+    const destPath = path.join(destFolder, ...relative.split('/'));
+    try {
+      const printed = await perforceService.printToTempFile(depotFile, { user: p4Config.user });
+      if (!printed.success) { errors.push(`${depotFile}: ${printed.error}`); continue; }
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.copyFile(printed.localPath, destPath);
+      fs.unlink(printed.localPath).catch(() => {});
+      downloaded++;
+    } catch (error) {
+      errors.push(`${depotFile}: ${error.message}`);
+    }
+  }
+  return { success: true, destFolder, downloaded, total: listed.files.length, errors };
+});
+
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
     const buffer = await fs.readFile(filePath);
@@ -214,18 +158,6 @@ ipcMain.handle('read-file', async (event, filePath) => {
     console.error('Error reading file:', error);
     return { success: false, error: error.message };
   }
-});
-
-ipcMain.handle('get-common-folders', async () => {
-  const homeDir = app.getPath('home');
-  const documentsDir = app.getPath('documents');
-  const desktopDir = app.getPath('desktop');
-  
-  return {
-    home: homeDir,
-    documents: documentsDir,
-    desktop: desktopDir,
-  };
 });
 
 // Perforce (P4) Integration - Full Implementation
@@ -549,85 +481,19 @@ ipcMain.handle('p4-check-file-status', async (event, filePath) => {
   }
 });
 
-ipcMain.handle('p4-checkout-file', async (event, filePath) => {
-  try {
-    const client = findClientForPath(filePath);
-    const { stdout, stderr } = await runP4Command(`edit "${filePath}"`, client);
-    const output = stdout + stderr;
-    
-    if (output.includes('opened for edit') || output.includes('currently opened')) {
-      return { success: true, message: 'File checked out for edit' };
-    }
-    
-    if (output.includes('not on client')) {
-      return { success: false, error: 'File is not in your P4 workspace mapping' };
-    }
-    
-    if (output.includes('file(s) not on client')) {
-      return { success: false, error: 'File path is not mapped in P4 workspace' };
-    }
-    
-    return { success: false, error: output || 'Unknown error' };
-  } catch (error) {
-    const errMsg = error.message || error.stderr || 'Unknown error';
-    if (errMsg.includes('not on client') || errMsg.includes('not under client')) {
-      return { success: false, error: 'File is outside your P4 workspace. Check your workspace View mapping.' };
-    }
-    return { success: false, error: errMsg };
-  }
-});
-
 ipcMain.handle('p4-checkout-files', async (event, data) => {
   // Support both old format (array of paths) and new format ({ filePaths, client })
   const filePaths = Array.isArray(data) ? data : data.filePaths;
   const clientOverride = Array.isArray(data) ? null : data.client;
   const results = [];
-  
-  for (const filePath of filePaths) {
-    try {
-      const client = clientOverride || findClientForPath(filePath);
-      const { stdout, stderr } = await runP4Command(`edit "${filePath}"`, client);
-      const output = stdout + stderr;
-      
-      if (output.includes('opened for edit') || output.includes('currently opened')) {
-        results.push({
-          file: filePath,
-          success: true,
-          message: 'Checked out',
-        });
-      } else if (output.includes('not on client') || output.includes('not under client') || output.includes('not in client view')) {
-        results.push({
-          file: filePath,
-          success: false,
-          error: `File is not under workspace "${client}" root. Select a workspace whose root covers this file.`,
-        });
-      } else {
-        results.push({
-          file: filePath,
-          success: false,
-          error: output.trim() || 'Failed to checkout',
-        });
-      }
-    } catch (error) {
-      results.push({
-        file: filePath,
-        success: false,
-        error: error.message || 'Failed to checkout',
-      });
-    }
-  }
-  
-  return results;
-});
 
-ipcMain.handle('p4-revert-file', async (event, filePath) => {
-  try {
-    const client = findClientForPath(filePath);
-    const { stdout } = await runP4Command(`revert "${filePath}"`, client);
-    return { success: true, message: stdout.trim() };
-  } catch (error) {
-    return { success: false, error: error.message };
+  for (const filePath of filePaths) {
+    const client = clientOverride || findClientForPath(filePath);
+    const result = await perforceService.checkoutFile(filePath, { client, user: p4Config.user });
+    results.push({ file: filePath, ...result });
   }
+
+  return results;
 });
 
 ipcMain.handle('p4-add-file', async (event, data) => {
@@ -662,199 +528,19 @@ ipcMain.handle('p4-add-file', async (event, data) => {
 });
 
 // Get all opened/pending files for a workspace
-ipcMain.handle('p4-get-opened', async (event, clientName = null) => {
-  try {
-    const client = clientName || p4Config.client;
-    const { stdout, stderr } = await runP4Command('opened', client);
-    const output = stdout || '';
-    
-    if (output.includes('File(s) not opened')) {
-      return { success: true, files: [] };
-    }
-    
-    // Parse opened files
-    // Format: //depot/path/file.ext#rev - action default change (type)
-    const files = [];
-    const lines = output.split('\n').filter(l => l.trim());
-    
-    for (const line of lines) {
-      const match = line.match(/^(.+)#(\d+)\s+-\s+(\w+)\s+(default\s+change|\w+)\s+\(([^)]+)\)/);
-      if (match) {
-        files.push({
-          depotFile: match[1],
-          revision: parseInt(match[2]),
-          action: match[3],
-          change: match[4].includes('default') ? 'default' : match[4],
-          type: match[5],
-        });
-      }
-    }
-    
-    return { success: true, files };
-  } catch (error) {
-    if (error.message?.includes('not opened')) {
-      return { success: true, files: [] };
-    }
-    return { success: false, error: error.message, files: [] };
-  }
-});
-
-// Get detailed file status with fstat
-ipcMain.handle('p4-fstat', async (event, filePath) => {
-  try {
-    const client = findClientForPath(filePath);
-    const { stdout } = await runP4Command(
-      `fstat -T "depotFile,clientFile,headAction,headType,action,otherOpen,ourLock,otherLock,haveRev,headRev" "${filePath}"`,
-      client
-    );
-    
-    // Parse fstat output
-    const result = {};
-    for (const line of stdout.split('\n')) {
-      if (!line.startsWith('... ')) continue;
-      const rest = line.slice(4);
-      const space = rest.indexOf(' ');
-      if (space === -1) continue;
-      const key = rest.slice(0, space).trim();
-      const val = rest.slice(space + 1).trim();
-      result[key] = val;
-    }
-    
-    // Determine overlay status
-    let status = 'normal';
-    if (!result.depotFile && !result.clientFile) status = 'untracked';
-    else if (result.action === 'edit') status = 'checked_out_by_me';
-    else if (result.action === 'add') status = 'added';
-    else if (result.otherOpen) status = 'checked_out_by_other';
-    else if (result.ourLock) status = 'locked_by_me';
-    else if (result.otherLock) status = 'locked_by_other';
-    
-    return {
-      success: true,
-      ...result,
-      status,
-      needsSync: result.haveRev && result.headRev && parseInt(result.haveRev) < parseInt(result.headRev),
-    };
-  } catch (error) {
-    const errMsg = error.message || '';
-    if (errMsg.includes('no such file') || errMsg.includes('not on client')) {
-      return { success: true, status: 'untracked' };
-    }
-    return { success: false, error: error.message };
-  }
-});
+ipcMain.handle('p4-get-opened', (event, clientName = null) =>
+  perforceService.getOpened({ client: clientName || p4Config.client, user: p4Config.user })
+);
 
 // Submit changes with description
-ipcMain.handle('p4-submit', async (event, { description, files = null, client = null }) => {
-  try {
-    const useClient = client || p4Config.client;
-    
-    if (!description || !description.trim()) {
-      return { success: false, error: 'Description is required' };
-    }
-    
-    // Simple escape - just escape double quotes
-    const escapedDesc = description.replace(/"/g, "'");
-    
-    // Always submit all opened files in the default changelist
-    const command = `submit -d "${escapedDesc}"`;
-    
-    console.log('P4 Submit command:', command);
-    console.log('P4 Client:', useClient);
-    
-    let output = '';
-    try {
-      const { stdout, stderr } = await runP4Command(command, useClient);
-      output = (stdout || '') + (stderr || '');
-      console.log('P4 Submit stdout:', stdout);
-      console.log('P4 Submit stderr:', stderr);
-    } catch (execError) {
-      // P4 sometimes returns non-zero exit code even on success
-      // Check if stdout/stderr contains success message
-      output = (execError.stdout || '') + (execError.stderr || '') + (execError.message || '');
-      console.log('P4 Submit execError:', execError);
-      console.log('P4 Submit error output:', output);
-    }
-    
-    console.log('P4 Submit full output:', output);
-    
-    // Check for ACTUAL success - must contain "submitted" 
-    const submittedMatch = output.match(/Change\s+(\d+)\s+submitted/i);
-    
-    if (submittedMatch) {
-      return { 
-        success: true, 
-        message: 'Changes submitted successfully',
-        changelist: parseInt(submittedMatch[1]),
-        output 
-      };
-    }
-    
-    // Also check for "submitted" anywhere in output
-    if (output.toLowerCase().includes('submitted')) {
-      const changeNum = output.match(/Change\s+(\d+)/i);
-      return { 
-        success: true, 
-        message: 'Changes submitted successfully',
-        changelist: changeNum ? parseInt(changeNum[1]) : null,
-        output 
-      };
-    }
-    
-    // Check if a changelist was created but NOT submitted
-    const createdMatch = output.match(/Change\s+(\d+)\s+created/i);
-    if (createdMatch) {
-      return { 
-        success: false, 
-        error: `Changelist ${createdMatch[1]} was created but not submitted. Click "Get Latest" and try again.`,
-        output 
-      };
-    }
-    
-    // Check for common errors
-    if (output.includes('No files to submit') || output.includes('File(s) not opened')) {
-      return { success: false, error: 'No files to submit. Check out some files first.' };
-    }
-    if (output.includes('out of date') || output.includes('must sync') || output.includes('must resolve')) {
-      return { success: false, error: 'Files are out of date. Click "Get Latest" first, then try again.' };
-    }
-    
-    // If nothing matched, return the raw output
-    return { success: false, error: output || 'Submit failed - no output from P4' };
-  } catch (error) {
-    console.error('P4 Submit exception:', error);
-    return { success: false, error: error.message || 'Submit command failed' };
-  }
-});
+ipcMain.handle('p4-submit', (event, { description, files = null, client = null }) =>
+  perforceService.submit({ description, client: client || p4Config.client, user: p4Config.user })
+);
 
 // Revert files (with option to revert unchanged only)
-ipcMain.handle('p4-revert-files', async (event, { files = null, unchangedOnly = false, client = null }) => {
-  try {
-    const useClient = client || p4Config.client;
-    
-    let command;
-    if (unchangedOnly) {
-      command = files && files.length > 0 
-        ? `revert -a ${files.map(f => `"${f}"`).join(' ')}`
-        : 'revert -a //...';
-    } else {
-      command = files && files.length > 0
-        ? `revert ${files.map(f => `"${f}"`).join(' ')}`
-        : 'revert //...';
-    }
-    
-    const { stdout, stderr } = await runP4Command(command, useClient);
-    const output = stdout + stderr;
-    
-    return { 
-      success: true, 
-      message: unchangedOnly ? 'Unchanged files reverted' : 'Files reverted',
-      output 
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
+ipcMain.handle('p4-revert-files', (event, { files = null, unchangedOnly = false, client = null }) =>
+  perforceService.revertFiles({ files, unchangedOnly, client: client || p4Config.client, user: p4Config.user })
+);
 
 // Sync files from depot
 ipcMain.handle('p4-sync', async (event, { path = '//...', force = false, client = null }) => {
@@ -897,208 +583,6 @@ ipcMain.handle('p4-diff', async (event, filePath) => {
       return { success: true, diff: '', hasDiff: false };
     }
     return { success: false, error: error.message };
-  }
-});
-
-// Get pending changelists
-ipcMain.handle('p4-get-pending-changes', async (event, { client = null, user = null }) => {
-  try {
-    const useClient = client || p4Config.client;
-    const useUser = user || p4Config.user;
-    
-    let command = 'changes -s pending';
-    if (useClient) command += ` -c "${useClient}"`;
-    if (useUser) command += ` -u "${useUser}"`;
-    
-    const { stdout } = await runP4Command(command, useClient);
-    
-    // Parse changes output
-    // Format: Change 12345 on 2024/01/01 by user@client 'description'
-    const changes = [];
-    const lines = stdout.split('\n').filter(l => l.trim());
-    
-    for (const line of lines) {
-      const match = line.match(/^Change\s+(\d+)\s+on\s+(\S+)\s+by\s+(\S+)\s+'(.*)'/);
-      if (match) {
-        changes.push({
-          number: parseInt(match[1]),
-          date: match[2],
-          userClient: match[3],
-          description: match[4],
-        });
-      }
-    }
-    
-    return { success: true, changes };
-  } catch (error) {
-    return { success: false, error: error.message, changes: [] };
-  }
-});
-
-// Describe a changelist (get files in it)
-ipcMain.handle('p4-describe-change', async (event, changeNumber) => {
-  try {
-    const { stdout } = await runP4Command(`describe -s ${changeNumber}`);
-    
-    // Parse describe output
-    const files = [];
-    let description = '';
-    let inFiles = false;
-    
-    for (const line of stdout.split('\n')) {
-      if (line.startsWith('Affected files ...')) {
-        inFiles = true;
-        continue;
-      }
-      if (inFiles && line.startsWith('... ')) {
-        const match = line.match(/\.\.\.\s+(.+)#(\d+)\s+(\w+)/);
-        if (match) {
-          files.push({
-            depotFile: match[1],
-            revision: parseInt(match[2]),
-            action: match[3],
-          });
-        }
-      } else if (!inFiles && line.trim() && !line.startsWith('Change ')) {
-        description += line.trim() + '\n';
-      }
-    }
-    
-    return { 
-      success: true, 
-      changeNumber,
-      description: description.trim(),
-      files 
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Get history for a file
-ipcMain.handle('p4-filelog', async (event, filePath) => {
-  try {
-    const client = findClientForPath(filePath);
-    const { stdout } = await runP4Command(`filelog -l -t "${filePath}"`, client);
-    
-    // Parse filelog output
-    const history = [];
-    const lines = stdout.split('\n');
-    let currentEntry = null;
-    
-    for (const line of lines) {
-      const revMatch = line.match(/^\.\.\.\s+#(\d+)\s+change\s+(\d+)\s+(\w+)\s+on\s+(\S+)\s+by\s+(\S+)/);
-      if (revMatch) {
-        if (currentEntry) history.push(currentEntry);
-        currentEntry = {
-          revision: parseInt(revMatch[1]),
-          change: parseInt(revMatch[2]),
-          action: revMatch[3],
-          date: revMatch[4],
-          user: revMatch[5],
-          description: '',
-        };
-      } else if (currentEntry && line.trim() && !line.startsWith('...')) {
-        currentEntry.description += line.trim() + ' ';
-      }
-    }
-    if (currentEntry) history.push(currentEntry);
-    
-    return { success: true, history };
-  } catch (error) {
-    return { success: false, error: error.message, history: [] };
-  }
-});
-
-// Refresh connection status (for periodic polling)
-ipcMain.handle('p4-refresh-status', async () => {
-  try {
-    const { stdout, stderr } = await execAsync('p4 info', { encoding: 'utf8', timeout: 5000 });
-    const output = stdout + stderr;
-    
-    const connected = !output.includes('Connect to server failed') && 
-                      !output.includes('Perforce client error') &&
-                      output.includes('Server address:');
-    
-    p4Config.connected = connected;
-    p4Config.lastCheck = Date.now();
-    
-    return { 
-      connected,
-      lastCheck: p4Config.lastCheck,
-      user: p4Config.user,
-      client: p4Config.client
-    };
-  } catch (error) {
-    p4Config.connected = false;
-    return { connected: false, error: error.message };
-  }
-});
-
-// Set active workspace/client
-ipcMain.handle('p4-set-client', async (event, clientName) => {
-  try {
-    // Verify the client exists
-    const clientInfo = p4Config.clients?.find(c => c.name === clientName);
-    if (!clientInfo && p4Config.clients?.length > 0) {
-      return { success: false, error: `Workspace "${clientName}" not found` };
-    }
-    
-    p4Config.client = clientName;
-    console.log('P4 active client set to:', clientName);
-    
-    return { 
-      success: true, 
-      client: clientName,
-      root: clientInfo?.root || null 
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-// Get available P4 streams
-ipcMain.handle('p4-get-streams', async () => {
-  try {
-    const { stdout, stderr } = await runP4Command('streams', p4Config.client);
-    const output = stdout || '';
-    const streams = [];
-    const lines = output.split('\n').filter(l => l.trim());
-    for (const line of lines) {
-      // Format: Stream //depot/stream type owner date 'description'
-      const match = line.match(/^Stream\s+(\S+)\s+(\S+)\s+/);
-      if (match) {
-        streams.push({
-          stream: match[1],
-          type: match[2],
-          name: match[1].split('/').filter(Boolean).pop(),
-        });
-      }
-    }
-    return { success: true, streams };
-  } catch (error) {
-    return { success: false, error: error.message, streams: [] };
-  }
-});
-
-// Get P4 depots
-ipcMain.handle('p4-get-depots', async () => {
-  try {
-    const { stdout } = await runP4Command('depots', p4Config.client);
-    const depots = [];
-    const lines = stdout.split('\n').filter(l => l.trim());
-    for (const line of lines) {
-      const match = line.match(/^Depot\s+(\S+)\s+\S+\s+(\S+)/);
-      if (match) {
-        depots.push({
-          name: match[1],
-          type: match[2],
-        });
-      }
-    }
-    return { success: true, depots };
-  } catch (error) {
-    return { success: false, error: error.message, depots: [] };
   }
 });
 
@@ -1149,7 +633,8 @@ async function ensureArtDepotClient() {
     if (!resolved) return { success: false, error: 'Workspace was created but could not be resolved.' };
   }
   p4Config.artDepotClient = resolved.client;
-  return { success: true, client: resolved.client };
+  const root = resolved.localPath.replace(/[\\/]?\.\.\.$/, '');
+  return { success: true, client: resolved.client, root };
 }
 
 // The Art-depot workspace, cached separately from the app's general-purpose
@@ -1192,89 +677,6 @@ ipcMain.handle('p4-upload-to-depot', async (event, { depotFolder, filePaths }) =
     }
   }
   return { success: true, results };
-});
-
-// Bulk add files to P4
-ipcMain.handle('p4-add-files', async (event, data) => {
-  // Support both old format (array of paths) and new format ({ filePaths, client })
-  const filePaths = Array.isArray(data) ? data : data.filePaths;
-  const clientOverride = Array.isArray(data) ? null : data.client;
-  const results = [];
-  for (const filePath of filePaths) {
-    try {
-      const client = clientOverride || findClientForPath(filePath);
-      const { stdout, stderr } = await runP4Command(`add "${filePath}"`, client);
-      const output = stdout + stderr;
-      if (output.includes('opened for add') || output.includes('currently opened')) {
-        results.push({ file: filePath, success: true });
-      } else if (output.includes('not on client') || output.includes('not under client') || output.includes('not in client view')) {
-        results.push({ file: filePath, success: false, error: `File is not under workspace "${client}" root. Select a workspace whose root covers this file's location.` });
-      } else {
-        results.push({ file: filePath, success: false, error: output.trim() || 'Failed to add file' });
-      }
-    } catch (error) {
-      const errMsg = error.message || '';
-      if (errMsg.includes('not on client') || errMsg.includes('not under client') || errMsg.includes('not in client view')) {
-        results.push({ file: filePath, success: false, error: `File is not under the selected workspace root. Select a workspace whose root covers this file's location.` });
-      } else {
-        results.push({ file: filePath, success: false, error: errMsg });
-      }
-    }
-  }
-  return results;
-});
-
-// ── Favorites storage (per OS user, file-based) ───────────────────────────
-
-// P4 search files in workspace
-ipcMain.handle('p4-search-files', async (event, { pattern, client }) => {
-  try {
-    const clientToUse = client || p4Config.client;
-    if (!clientToUse) {
-      return { success: false, error: 'No P4 workspace selected', files: [] };
-    }
-    // Use p4 files with a wildcard pattern under the workspace view
-    // Search across all depot paths: //.../*pattern*
-    const searchPattern = `//.../*${pattern}*`;
-    const { stdout } = await runP4Command(`files "${searchPattern}"`, clientToUse);
-    const files = [];
-    const lines = stdout.split('\n').filter(l => l.trim());
-    for (const line of lines) {
-      const match = line.match(/^(.+)#(\d+)\s+-\s+(\w+)/);
-      if (match && match[3] !== 'delete') {
-        files.push({
-          depotFile: match[1],
-          revision: parseInt(match[2]),
-          action: match[3],
-          name: match[1].split('/').pop(),
-        });
-      }
-    }
-    // Also try to resolve local paths via p4 where
-    const filesWithLocal = [];
-    // Batch resolve up to 200 results for performance
-    const filesToResolve = files.slice(0, 200);
-    for (const file of filesToResolve) {
-      try {
-        const { stdout: whereOut } = await runP4Command(`where "${file.depotFile}"`, clientToUse);
-        const whereLine = whereOut.split('\n').find(l => l.trim() && !l.startsWith('-'));
-        if (whereLine) {
-          // p4 where output: depotPath viewPath localPath
-          const parts = whereLine.trim().split(/\s+/);
-          if (parts.length >= 3) {
-            file.localFile = parts.slice(2).join(' ');
-          }
-        }
-      } catch { /* no local mapping */ }
-      filesWithLocal.push(file);
-    }
-    return { success: true, files: filesWithLocal };
-  } catch (error) {
-    if (error.message?.includes('no such file') || error.message?.includes('must refer to client')) {
-      return { success: true, files: [] };
-    }
-    return { success: false, error: error.message, files: [] };
-  }
 });
 
 // ---------- Profiles (per-user, keyed on Perforce user, OS-user fallback) ----------
@@ -1340,16 +742,6 @@ ipcMain.handle('profile-save', async (event, profile) => {
   catch (error) { return { success: false, error: error.message }; }
 });
 
-ipcMain.handle('favorites-load', async () => {
-  try { const p = await readProfile(); return { success: true, favorites: p.favorites || [] }; }
-  catch { return { success: true, favorites: [] }; }
-});
-
-ipcMain.handle('favorites-save', async (event, favorites) => {
-  try { await writeProfile({ favorites: Array.isArray(favorites) ? favorites : [] }); return { success: true }; }
-  catch (error) { return { success: false, error: error.message }; }
-});
-
 // ---------- 2.0 library helpers ----------
 
 ipcMain.handle('list-folder-files', async (event, dirPath) => {
@@ -1376,102 +768,25 @@ ipcMain.handle('list-folder-files', async (event, dirPath) => {
   }
 });
 
-ipcMain.handle('rename-file', async (event, { path: oldPath, newName }) => {
-  try {
-    const dir = path.dirname(oldPath);
-    const origExt = path.extname(oldPath);
-    const finalName = path.extname(newName) ? newName : `${newName}${origExt}`;
-    const newPath = path.join(dir, finalName);
-    await fs.rename(oldPath, newPath);
-    return { success: true, path: newPath, name: finalName };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('open-in-explorer', async (event, targetPath) => {
-  try { shell.showItemInFolder(targetPath); return { success: true }; }
-  catch (error) { return { success: false, error: error.message }; }
-});
-
-// Get info about a path (file or folder) for favorites display
-ipcMain.handle('get-path-info', async (event, targetPath) => {
-  try {
-    const stats = await fs.stat(targetPath);
-    return {
-      success: true,
-      name: path.basename(targetPath),
-      path: targetPath,
-      type: stats.isDirectory() ? 'directory' : 'file',
-      size: stats.size,
-      lastModified: stats.mtime.toISOString(),
-    };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
 // ---------- 2.0 asset library: recursive zip scan + embedded preview extraction ----------
 
 const zipPreviewCache = new Map();
 const PREVIEW_IMG_RE = /\.(png|jpe?g|webp)$/i;
 
 async function findAndExtractPreview(zipPath) {
-  const fh = await fs.open(zipPath, 'r');
-  try {
-    const stat = await fh.stat();
-    const size = stat.size;
-    if (size < 22) return null;
-    const tailLen = Math.min(size, 66560);
-    const tail = Buffer.alloc(tailLen);
-    await fh.read(tail, 0, tailLen, size - tailLen);
-    let eocd = -1;
-    for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-    }
-    if (eocd < 0) return null;
-    const cdSize = tail.readUInt32LE(eocd + 12);
-    const cdOffset = tail.readUInt32LE(eocd + 16);
-    if (!cdSize || cdOffset + cdSize > size) return null;
-    const cd = Buffer.alloc(cdSize);
-    await fh.read(cd, 0, cdSize, cdOffset);
-    const entries = [];
-    let p = 0;
-    while (p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50) {
-      const method = cd.readUInt16LE(p + 10);
-      const compSize = cd.readUInt32LE(p + 20);
-      const fnLen = cd.readUInt16LE(p + 28);
-      const extraLen = cd.readUInt16LE(p + 30);
-      const commentLen = cd.readUInt16LE(p + 32);
-      const localOffset = cd.readUInt32LE(p + 42);
-      const name = cd.toString('utf8', p + 46, p + 46 + fnLen);
-      entries.push({ name, method, compSize, localOffset });
-      p += 46 + fnLen + extraLen + commentLen;
-    }
+  const result = await zipService.readZipEntry(zipPath, (entries) => {
     const imgs = entries.filter((e) => PREVIEW_IMG_RE.test(e.name));
     if (imgs.length === 0) return null;
-    const chosen =
+    return (
       imgs.find((e) => /preview/i.test(e.name)) ||
       imgs.find((e) => /thumb/i.test(e.name)) ||
-      imgs.slice().sort((a, b) => a.compSize - b.compSize)[0];
-    const lh = Buffer.alloc(30);
-    await fh.read(lh, 0, 30, chosen.localOffset);
-    if (lh.readUInt32LE(0) !== 0x04034b50) return null;
-    const lfnLen = lh.readUInt16LE(26);
-    const lextraLen = lh.readUInt16LE(28);
-    const dataStart = chosen.localOffset + 30 + lfnLen + lextraLen;
-    const comp = Buffer.alloc(chosen.compSize);
-    await fh.read(comp, 0, chosen.compSize, dataStart);
-    let raw;
-    if (chosen.method === 0) raw = comp;
-    else if (chosen.method === 8) raw = zlib.inflateRawSync(comp);
-    else return null;
-    const ext = (chosen.name.split('.').pop() || 'png').toLowerCase();
-    const mime = (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'webp' ? 'image/webp' : 'image/png');
-    return { data: raw.toString('base64'), mime };
-  } finally {
-    await fh.close();
-  }
+      imgs.slice().sort((a, b) => a.compSize - b.compSize)[0]
+    );
+  });
+  if (!result) return null;
+  const ext = (result.entry.name.split('.').pop() || 'png').toLowerCase();
+  const mime = (ext === 'jpg' || ext === 'jpeg') ? 'image/jpeg' : (ext === 'webp' ? 'image/webp' : 'image/png');
+  return { data: result.data.toString('base64'), mime };
 }
 
 ipcMain.handle('read-zip-preview', async (event, zipPath) => {
@@ -1486,33 +801,22 @@ ipcMain.handle('read-zip-preview', async (event, zipPath) => {
   }
 });
 
-async function scanAssetLibrary(rootPath, maxDepth, cap, acc, depth) {
-  if (acc.length >= cap || depth > maxDepth) return;
-  let entries;
-  try { entries = await fs.readdir(rootPath, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    if (acc.length >= cap) return;
-    if (e.name.startsWith('.')) continue;
-    const full = path.join(rootPath, e.name);
-    if (e.isDirectory()) {
-      await scanAssetLibrary(full, maxDepth, cap, acc, depth + 1);
-    } else if (e.name.toLowerCase().endsWith('.zip')) {
-      acc.push({ name: e.name.replace(/\.zip$/i, ''), path: full, type: 'zipAsset' });
-    }
-  }
-}
-
-ipcMain.handle('scan-asset-library', async (event, rootPath) => {
+// Decode formats with no native browser preview (TGA, TIFF) and hand back a
+// PNG the renderer can show through its existing <img> path. See
+// services/imageConvert.js for why no row-flip is needed and why EXR isn't
+// included yet.
+const imageConvertCache = new Map();
+ipcMain.handle('convert-image-preview', async (event, filePath, ext) => {
   try {
-    const acc = [];
-    await scanAssetLibrary(rootPath, 6, 3000, acc, 0);
-    return { success: true, items: acc };
+    const key = `${filePath}::${ext}`;
+    if (imageConvertCache.has(key)) return imageConvertCache.get(key);
+    const out = await imageConvertService.convertToPngPreview(filePath, ext);
+    imageConvertCache.set(key, out);
+    return out;
   } catch (error) {
-    return { success: false, error: error.message, items: [] };
+    return { success: false, error: error.message };
   }
 });
-
-const LIB_IMG_RE = /\.(png|jpe?g|webp|gif|bmp|tga|tif|tiff|exr)$/i;
 
 // Peek one level into a directory: does it hold files (=> asset), and a preview image.
 // Resolve real directory-ness. OneDrive/cloud placeholders and junctions can be
@@ -1539,7 +843,7 @@ async function classifyDir(dirPath) {
     const lower = e.name.toLowerCase();
     if (lower.endsWith('.dslmeta.json')) hasSidecar = true;
     if (lower.endsWith('.zip')) hasZip = true;
-    if (!firstImage && LIB_IMG_RE.test(e.name)) firstImage = full;
+    if (!firstImage && classifyAsset(e.name).category === 'image') firstImage = full;
   }
   return { hasSidecar, hasSubdir, hasFiles, hasZip, firstImage };
 }
@@ -1693,43 +997,9 @@ ipcMain.handle('scan-libraries', async (event, roots) => {
   return { success: true, summary, index: idx };
 });
 
-ipcMain.handle('index-check', async (event, roots) => {
-  const idx = await loadIndex();
-  const results = [];
-  for (const root of (roots || [])) {
-    const prev = idx.libraries[root];
-    if (!prev) { results.push({ root, scanned: false, scannedAt: null, changed: null }); continue; }
-    const now = await collectDirMtimes(root, 12, {}, 0);
-    results.push({ root, scanned: true, scannedAt: prev.scannedAt, changed: countChanged(prev.mtimes, now) });
-  }
-  return { success: true, results };
-});
-
 // ---------- 2.0 catalog: per-asset sidecars + Megascans JSON extraction ----------
 
 const zipMetaCache = new Map();
-
-function sidecarPathFor(assetPath) {
-  return assetPath + '.dslmeta.json';
-}
-
-ipcMain.handle('sidecar-load', async (event, assetPath) => {
-  try {
-    const d = await fs.readFile(sidecarPathFor(assetPath), 'utf-8');
-    return { success: true, record: JSON.parse(d) };
-  } catch {
-    return { success: true, record: null };
-  }
-});
-
-ipcMain.handle('sidecar-save', async (event, { assetPath, record }) => {
-  try {
-    await fs.writeFile(sidecarPathFor(assetPath), JSON.stringify(record, null, 2), 'utf-8');
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
 
 function normalizeMegascans(j) {
   const autoTags = []
@@ -1755,55 +1025,13 @@ function normalizeMegascans(j) {
 }
 
 async function readZipJson(zipPath) {
-  const fh = await fs.open(zipPath, 'r');
-  try {
-    const stat = await fh.stat();
-    const size = stat.size;
-    if (size < 22) return null;
-    const tailLen = Math.min(size, 66560);
-    const tail = Buffer.alloc(tailLen);
-    await fh.read(tail, 0, tailLen, size - tailLen);
-    let eocd = -1;
-    for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-    }
-    if (eocd < 0) return null;
-    const cdSize = tail.readUInt32LE(eocd + 12);
-    const cdOffset = tail.readUInt32LE(eocd + 16);
-    if (!cdSize || cdOffset + cdSize > size) return null;
-    const cd = Buffer.alloc(cdSize);
-    await fh.read(cd, 0, cdSize, cdOffset);
-    const entries = [];
-    let p = 0;
-    while (p + 46 <= cd.length && cd.readUInt32LE(p) === 0x02014b50) {
-      const method = cd.readUInt16LE(p + 10);
-      const compSize = cd.readUInt32LE(p + 20);
-      const fnLen = cd.readUInt16LE(p + 28);
-      const extraLen = cd.readUInt16LE(p + 30);
-      const commentLen = cd.readUInt16LE(p + 32);
-      const localOffset = cd.readUInt32LE(p + 42);
-      const name = cd.toString('utf8', p + 46, p + 46 + fnLen);
-      if (/\.json$/i.test(name)) entries.push({ name, method, compSize, localOffset });
-      p += 46 + fnLen + extraLen + commentLen;
-    }
-    if (entries.length === 0) return null;
-    const chosen = entries.slice().sort((a, b) => b.compSize - a.compSize)[0];
-    const lh = Buffer.alloc(30);
-    await fh.read(lh, 0, 30, chosen.localOffset);
-    if (lh.readUInt32LE(0) !== 0x04034b50) return null;
-    const dataStart = chosen.localOffset + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
-    const comp = Buffer.alloc(chosen.compSize);
-    await fh.read(comp, 0, chosen.compSize, dataStart);
-    let raw;
-    if (chosen.method === 0) raw = comp;
-    else if (chosen.method === 8) raw = zlib.inflateRawSync(comp);
-    else return null;
-    return JSON.parse(raw.toString('utf8'));
-  } catch {
-    return null;
-  } finally {
-    await fh.close();
-  }
+  const result = await zipService.readZipEntry(zipPath, (entries) => {
+    const jsons = entries.filter((e) => /\.json$/i.test(e.name));
+    if (jsons.length === 0) return null;
+    return jsons.slice().sort((a, b) => b.compSize - a.compSize)[0];
+  });
+  if (!result) return null;
+  return JSON.parse(result.data.toString('utf8'));
 }
 
 ipcMain.handle('read-zip-metadata', async (event, zipPath) => {
@@ -1844,14 +1072,4 @@ ipcMain.handle('settings-save', async (event, settings) => {
   } catch (error) {
     return { success: false, error: error.message };
   }
-});
-
-// ---------- 2.0: pick a single image file (for collection covers) ----------
-ipcMain.handle('select-image', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
-  });
-  if (result.canceled || !result.filePaths || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
 });

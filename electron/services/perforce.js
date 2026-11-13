@@ -164,6 +164,26 @@ export async function listDepotFiles(depotPath, { user } = {}) {
 }
 
 /**
+ * List every file under a depot folder, at any depth (`p4 files foo/...`),
+ * for a whole-folder download — one command instead of walking the tree
+ * folder by folder.
+ */
+export async function listDepotFilesRecursive(depotPath, { user } = {}) {
+  const search = depotPath.endsWith('/') ? `${depotPath}...` : `${depotPath}/...`;
+  try {
+    const { stdout } = await execAsync(buildCommand(`files "${search}"`, { user }), { encoding: 'utf8', timeout: 30000 });
+    const files = parseTaggedRecords(stdout)
+      .filter((r) => r.depotFile && r.action !== 'delete')
+      .map((r) => r.depotFile);
+    return { success: true, files };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    if (/no such file/i.test(output)) return { success: true, files: [] };
+    return { success: false, files: [], error: output || error.message };
+  }
+}
+
+/**
  * Fetch a depot file's raw bytes to a local temp file via `p4 print`, with
  * no workspace involved at all — used both for full-asset preview/download
  * and for fetching a small sidecar metadata file.
@@ -257,5 +277,188 @@ export async function createMinimalClient({ user, depotRoot, localRoot, clientNa
   } catch (error) {
     const output = ((error.stdout || '') + (error.stderr || '')).trim();
     return { success: false, error: output || error.message };
+  }
+}
+
+// Check out an existing depot file for edit. Success is read from the
+// tagged record (action: 'edit') instead of matching the string "opened
+// for edit" in plain text. Error text is unaffected by -Ztag — only
+// successful output gets tagged, errors still print as plain text — so
+// the existing error-string checks carry over unchanged.
+export async function checkoutFile(filePath, { client, user } = {}) {
+  try {
+    const { stdout, stderr } = await execAsync(buildCommand(`edit "${filePath}"`, { user, client }), { encoding: 'utf8', timeout: 15000 });
+    const record = parseTaggedRecords(stdout)[0];
+    if (record && record.action === 'edit') {
+      return { success: true, message: 'Checked out' };
+    }
+    const output = (stdout + stderr).trim();
+    if (output.includes('not on client') || output.includes('not under client') || output.includes('not in client view')) {
+      return { success: false, error: `File is not under workspace "${client}" root. Select a workspace whose root covers this file.` };
+    }
+    return { success: false, error: output || 'Failed to checkout' };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    if (output.includes('not on client') || output.includes('not under client') || output.includes('not in client view')) {
+      return { success: false, error: `File is not under workspace "${client}" root. Select a workspace whose root covers this file.` };
+    }
+    return { success: false, error: output || error.message || 'Failed to checkout' };
+  }
+}
+
+// Mark a local file for add. Same success-detection swap as checkoutFile.
+export async function addFile(filePath, { client, user } = {}) {
+  try {
+    const { stdout, stderr } = await execAsync(buildCommand(`add "${filePath}"`, { user, client }), { encoding: 'utf8', timeout: 15000 });
+    const record = parseTaggedRecords(stdout)[0];
+    if (record && record.action === 'add') {
+      return { success: true, message: 'File marked for add' };
+    }
+    const output = (stdout + stderr).trim();
+    if (output.includes('not on client') || output.includes('not under client')) {
+      return { success: false, error: `File is outside workspace "${client}". The file must be under the workspace root folder.` };
+    }
+    if (output.includes('file(s) not in client view')) {
+      return { success: false, error: `File path not mapped in workspace "${client}" view. Select a different workspace or update your workspace mapping.` };
+    }
+    return { success: false, error: output || 'Failed to add file' };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    if (output.includes('not on client') || output.includes('not under client') || output.includes('not in client view')) {
+      return { success: false, error: 'File is outside the selected P4 workspace. Select a workspace whose root covers this file location.' };
+    }
+    return { success: false, error: output || error.message || 'Failed to add file' };
+  }
+}
+
+// Revert files — a batch command, not per-file, matching the existing
+// handler's behavior exactly (it never parsed per-file revert results).
+export async function revertFiles({ files = null, unchangedOnly = false, client, user } = {}) {
+  let command;
+  if (unchangedOnly) {
+    command = files && files.length > 0
+      ? `revert -a ${files.map((f) => `"${f}"`).join(' ')}`
+      : 'revert -a //...';
+  } else {
+    command = files && files.length > 0
+      ? `revert ${files.map((f) => `"${f}"`).join(' ')}`
+      : 'revert //...';
+  }
+  try {
+    const { stdout, stderr } = await execAsync(buildCommand(command, { user, client }), { encoding: 'utf8', timeout: 20000 });
+    const output = (stdout + stderr).trim();
+    return { success: true, message: unchangedOnly ? 'Unchanged files reverted' : 'Files reverted', output };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    return { success: false, error: output || error.message };
+  }
+}
+
+// Pending/opened files for a workspace. This is the exact site of a real
+// shipped bug: the old plain-text regex required the type field to match
+// \w+ only, but Perforce's real type strings include modifiers like
+// "binary+l" — the '+' silently failed the match and dropped every binary
+// file from the result. Tagged output gives `type` as one clean field,
+// with no regex over it at all.
+export async function getOpened({ client, user } = {}) {
+  try {
+    const { stdout } = await execAsync(buildCommand('opened', { user, client }), { encoding: 'utf8', timeout: 15000 });
+    if (stdout.includes('File(s) not opened')) {
+      return { success: true, files: [] };
+    }
+    const files = parseTaggedRecords(stdout)
+      .filter((r) => r.depotFile)
+      .map((r) => ({
+        depotFile: r.depotFile,
+        revision: parseInt(r.rev, 10) || 0,
+        action: r.action,
+        change: r.change,
+        type: r.type,
+      }));
+    return { success: true, files };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    if (/not opened/i.test(output)) {
+      return { success: true, files: [] };
+    }
+    return { success: false, error: output || error.message, files: [] };
+  }
+}
+
+// Submit is deliberately NOT migrated to -Ztag: it has no file-path
+// ambiguity risk (the only thing extracted is a changelist number), and
+// its success path can't be safely dry-run against a real shared depot
+// the way every other function here was verified live. Kept on its
+// already-working plain-text parsing rather than trusting an untested
+// rewrite of the one path that can't be tested.
+export async function submit({ description, client, user } = {}) {
+  if (!description || !description.trim()) {
+    return { success: false, error: 'Description is required' };
+  }
+  const escapedDesc = description.replace(/"/g, "'");
+  const command = `submit -d "${escapedDesc}"`;
+
+  let output = '';
+  try {
+    const { stdout, stderr } = await execAsync(buildCommand(command, { user, client, tagged: false }), { encoding: 'utf8', timeout: 30000 });
+    output = (stdout || '') + (stderr || '');
+  } catch (execError) {
+    output = (execError.stdout || '') + (execError.stderr || '') + (execError.message || '');
+  }
+
+  const submittedMatch = output.match(/Change\s+(\d+)\s+submitted/i);
+  if (submittedMatch) {
+    return { success: true, message: 'Changes submitted successfully', changelist: parseInt(submittedMatch[1], 10), output };
+  }
+  if (output.toLowerCase().includes('submitted')) {
+    const changeNum = output.match(/Change\s+(\d+)/i);
+    return { success: true, message: 'Changes submitted successfully', changelist: changeNum ? parseInt(changeNum[1], 10) : null, output };
+  }
+  const createdMatch = output.match(/Change\s+(\d+)\s+created/i);
+  if (createdMatch) {
+    return { success: false, error: `Changelist ${createdMatch[1]} was created but not submitted. Click "Get Latest" and try again.`, output };
+  }
+  if (output.includes('No files to submit') || output.includes('File(s) not opened')) {
+    return { success: false, error: 'No files to submit. Check out some files first.' };
+  }
+  if (output.includes('out of date') || output.includes('must sync') || output.includes('must resolve')) {
+    return { success: false, error: 'Files are out of date. Click "Get Latest" first, then try again.' };
+  }
+  return { success: false, error: output || 'Submit failed - no output from P4' };
+}
+
+// Search files under the active workspace's view by name fragment. Reuses
+// the same -Ztag files + -Ztag where pattern already proven for depot
+// browsing and upload path resolution — which also fixes a second instance
+// of the same space-in-filename bug class in the local-path resolution
+// here, matching the one already found and fixed in the upload flow.
+export async function searchFiles({ pattern, client, user } = {}) {
+  if (!client) {
+    return { success: false, error: 'No P4 workspace selected', files: [] };
+  }
+  const searchPattern = `//.../*${pattern}*`;
+  try {
+    const { stdout } = await execAsync(buildCommand(`files "${searchPattern}"`, { user, client }), { encoding: 'utf8', timeout: 20000 });
+    const files = parseTaggedRecords(stdout)
+      .filter((r) => r.depotFile && r.action !== 'delete')
+      .map((r) => ({
+        depotFile: r.depotFile,
+        revision: parseInt(r.rev, 10) || 0,
+        action: r.action,
+        name: r.depotFile.split('/').pop(),
+      }));
+
+    for (const file of files.slice(0, 200)) {
+      try {
+        const { stdout: whereOut } = await execAsync(buildCommand(`where "${file.depotFile}"`, { user, client }), { encoding: 'utf8', timeout: 10000 });
+        const line = whereOut.split(/\r?\n/).find((l) => l.startsWith('... path '));
+        if (line) file.localFile = line.slice('... path '.length).trim();
+      } catch { /* no local mapping */ }
+    }
+    return { success: true, files };
+  } catch (error) {
+    const output = ((error.stdout || '') + (error.stderr || '')).trim();
+    if (/no such file/i.test(output)) return { success: true, files: [] };
+    return { success: false, files: [], error: output || error.message };
   }
 }

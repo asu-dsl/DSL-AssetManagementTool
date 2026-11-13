@@ -182,29 +182,6 @@
   word-break: break-all;
 }
 
-.p4-client-select {
-  flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--surface-1);
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 11px;
-  color: var(--text);
-  cursor: pointer;
-  max-width: 200px;
-}
-
-.p4-client-select:hover {
-  border-color: var(--primary);
-}
-
-.p4-client-select:focus {
-  outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2);
-}
-
 .p4-root-row {
   margin-top: 4px;
   padding-top: 4px;
@@ -496,64 +473,6 @@
   opacity: 0.5;
   cursor: not-allowed;
   transform: none;
-}
-
-/* Load/Action Buttons */
-.p4-load-btn {
-  width: 100%;
-  justify-content: center;
-}
-
-/* Streams List */
-.p4-streams-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.p4-stream-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.2s;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.p4-stream-item:hover {
-  background: rgba(var(--primary-rgb), 0.08);
-}
-
-.p4-stream-item.active {
-  background: rgba(var(--primary-rgb), 0.15);
-  border: 1px solid rgba(var(--primary-rgb), 0.3);
-}
-
-.p4-stream-item svg {
-  color: var(--primary);
-  flex-shrink: 0;
-}
-
-.stream-name {
-  flex: 1;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stream-type {
-  font-size: 10px;
-  color: var(--text-faint);
-  padding: 2px 6px;
-  background: var(--surface-2);
-  border-radius: 3px;
-  flex-shrink: 0;
 }
 
 /* Depot Browser */

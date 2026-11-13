@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, X, GitBranch, Lock, Unlock, Server, User, FolderGit, ExternalLink, RefreshCw } from 'lucide-react';
+import { Plus, X, Upload } from 'lucide-react';
 import './MetadataPanel.css';
 
-const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate, onOpenP4Panel }) => {
+// The Perforce connection box that used to live here has moved to the
+// Upload-to-Perforce panel — this editor only needs to know whether P4 is
+// available/connected (to gate the Push button) and which workspace to push
+// into, not display its own copy of the connection details.
+const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate, p4, onRefreshOpened }) => {
   const [mode, setMode] = useState('batch'); // 'batch' or 'single'
   const [formData, setFormData] = useState({
     title: '',
@@ -12,94 +16,31 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
     notes: '',
   });
   const [customFields, setCustomFields] = useState([]);
-  const [p4Available, setP4Available] = useState(false);
-  const [p4Info, setP4Info] = useState(null);
-  const [p4Connected, setP4Connected] = useState(false);
+  const p4Available = p4.available;
+  const p4Connected = p4.connected;
   const [p4Status, setP4Status] = useState({});
-  const [isCheckingOut, setIsCheckingOut] = useState(false);
-  const [showP4Details, setShowP4Details] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [p4Clients, setP4Clients] = useState([]);
+  const [isPushing, setIsPushing] = useState(false);
   const [selectedP4Client, setSelectedP4Client] = useState('');
-  const connectionCheckInterval = useRef(null);
+  // Fields now auto-apply on every change, which updates the `metadata`
+  // prop right back — without this guard, the resync effect below would
+  // immediately overwrite whatever the user is mid-typing with the value
+  // it just applied (lossy for tags in particular, since trailing ", "
+  // while starting a new tag gets dropped on the round trip through the
+  // array it's stored as).
+  const skipNextMetadataSync = useRef(false);
 
-  // Check if P4 is available and get info
+  // The app only works within the Art depot workspace — resolve (or create,
+  // on a machine that's never touched P4V) that one workspace, the same way
+  // the Upload feature already does, instead of offering a dropdown across
+  // all of the user's workspaces.
   useEffect(() => {
-    const checkP4 = async () => {
-      if (window.electron && window.electron.p4CheckAvailable) {
-        const result = await window.electron.p4CheckAvailable();
-        setP4Available(result.available);
-        
-        if (result.available && window.electron.p4GetInfo) {
-          const info = await window.electron.p4GetInfo();
-          if (info.success) {
-            setP4Info(info);
-            setP4Connected(info.connected || false);
-            if (info.clients && info.clients.length > 0) {
-              setP4Clients(info.clients);
-              setSelectedP4Client(info.client || info.clients[0].name);
-            }
-          }
-        }
-      }
-    };
-    checkP4();
-  }, []);
-
-  // Live connection checking - every 30 seconds
-  useEffect(() => {
-    if (!p4Available) return;
-
-    const checkConnection = async () => {
-      if (window.electron && window.electron.p4CheckConnection) {
-        const result = await window.electron.p4CheckConnection();
-        setP4Connected(result.connected);
-        if (result.info) {
-          setP4Info(prev => ({ ...prev, ...result.info }));
-        }
-      }
-    };
-
-    // Initial check
-    checkConnection();
-
-    // Set up interval for live checking
-    connectionCheckInterval.current = setInterval(checkConnection, 30000);
-
-    return () => {
-      if (connectionCheckInterval.current) {
-        clearInterval(connectionCheckInterval.current);
-      }
-    };
-  }, [p4Available]);
-
-  // Manual refresh function
-  const handleRefreshConnection = async () => {
-    setIsRefreshing(true);
-    try {
-      if (window.electron && window.electron.p4CheckConnection) {
-        const result = await window.electron.p4CheckConnection();
-        setP4Connected(result.connected);
-        if (result.info) {
-          setP4Info(prev => ({ ...prev, ...result.info }));
-        }
-      }
-      
-      // Also refresh file status
-      if (selectedFiles.length > 0) {
-        const statusMap = {};
-        for (const file of selectedFiles) {
-          if (window.electron && window.electron.p4CheckFileStatus) {
-            const status = await window.electron.p4CheckFileStatus(file.path);
-            statusMap[file.path] = status;
-          }
-        }
-        setP4Status(statusMap);
-      }
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
+    if (selectedP4Client || !p4Available) return;
+    if (!window.electron?.p4ResolveArtClient) return;
+    (async () => {
+      const resolved = await window.electron.p4ResolveArtClient();
+      if (resolved.success) setSelectedP4Client(resolved.client);
+    })();
+  }, [p4Available, selectedP4Client]);
 
   // Check P4 status for selected files
   useEffect(() => {
@@ -120,6 +61,10 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
   }, [p4Available, selectedFiles]);
 
   useEffect(() => {
+    if (skipNextMetadataSync.current) {
+      skipNextMetadataSync.current = false;
+      return;
+    }
     if (mode === 'single' && metadata) {
       setFormData({
         title: metadata.title || '',
@@ -145,37 +90,16 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
     }
   }, [mode, currentFile, metadata]);
 
+  // Edits apply immediately, field by field, instead of waiting for an
+  // explicit "Apply" click — no button, no local draft state to lose track
+  // of.
   const handleInputChange = (field, value) => {
     setFormData({ ...formData, [field]: value });
-  };
-
-  const handleApplyField = (field) => {
-    const value = formData[field];
-    if (!value.trim()) return;
-
+    skipNextMetadataSync.current = true;
     const metadataUpdate = {
-      [field]: field === 'tags' ? value.split(',').map(t => t.trim()) : value,
+      [field]: field === 'tags' ? value.split(',').map(t => t.trim()).filter(Boolean) : value,
     };
-
     onMetadataUpdate(metadataUpdate, mode === 'batch');
-    
-    if (mode === 'batch') {
-      setFormData({ ...formData, [field]: '' });
-    }
-  };
-
-  const handleApplyNotes = () => {
-    if (!formData.notes.trim()) return;
-
-    const metadataUpdate = {
-      notes: formData.notes,
-    };
-
-    onMetadataUpdate(metadataUpdate, mode === 'batch');
-    
-    if (mode === 'batch') {
-      setFormData({ ...formData, notes: '' });
-    }
   };
 
   const handleAddCustomField = () => {
@@ -186,129 +110,72 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
     setCustomFields(customFields.filter((_, i) => i !== index));
   };
 
+  // A custom field only makes sense once both its key and value are
+  // filled in, so (unlike the named fields above) it applies once that
+  // becomes true rather than on every keystroke.
   const handleCustomFieldChange = (index, field, value) => {
     const newFields = [...customFields];
-    newFields[index][field] = value;
+    newFields[index] = { ...newFields[index], [field]: value };
     setCustomFields(newFields);
-  };
 
-  const handleApplyCustomField = (index) => {
-    const field = customFields[index];
-    if (!field.key.trim() || !field.value.trim()) return;
-
-    const metadataUpdate = {
-      [field.key]: field.value,
-    };
-
-    onMetadataUpdate(metadataUpdate, mode === 'batch');
-  };
-
-  const handleP4Checkout = async () => {
-    if (!p4Available || selectedFiles.length === 0) return;
-    
-    setIsCheckingOut(true);
-    const filesToCheckout = selectedFiles.map(f => f.path);
-    
-    try {
-      const results = await window.electron.p4CheckoutFiles({ filePaths: filesToCheckout, client: selectedP4Client || null });
-      const successCount = results.filter(r => r.success).length;
-      const failCount = results.length - successCount;
-      
-      if (successCount > 0 && failCount === 0) {
-        // All successful - show brief success message
-        console.log(`P4: ${successCount} file(s) checked out`);
-      } else if (successCount > 0) {
-        alert(`P4: ${successCount} checked out, ${failCount} failed`);
-      } else {
-        // All failed - show first error
-        const firstError = results.find(r => !r.success);
-        alert(`P4 Checkout failed:\n${firstError?.error || 'Unknown error'}`);
-      }
-      
-      // Refresh P4 status
-      const statusMap = {};
-      for (const file of selectedFiles) {
-        const status = await window.electron.p4CheckFileStatus(file.path);
-        statusMap[file.path] = status;
-      }
-      setP4Status(statusMap);
-    } catch (error) {
-      alert('P4 error: ' + error.message);
-    } finally {
-      setIsCheckingOut(false);
+    const updated = newFields[index];
+    if (updated.key.trim() && updated.value.trim()) {
+      skipNextMetadataSync.current = true;
+      onMetadataUpdate({ [updated.key]: updated.value }, mode === 'batch');
     }
   };
 
-  const handleP4Add = async () => {
+  // Checks out files already tracked in the depot and adds files that
+  // aren't, in one action — replaces the separate Checkout/Add buttons that
+  // used to live in this panel's own Perforce box.
+  const handlePushToPerforce = async () => {
     if (!p4Available || selectedFiles.length === 0) return;
-    
-    setIsCheckingOut(true);
-    
+
+    setIsPushing(true);
     try {
-      let successCount = 0;
-      let failCount = 0;
-      
+      const freshStatus = {};
       for (const file of selectedFiles) {
-        const result = await window.electron.p4AddFile({ filePath: file.path, client: selectedP4Client || null });
-        if (result.success) {
-          successCount++;
-        } else {
-          failCount++;
+        if (window.electron && window.electron.p4CheckFileStatus) {
+          freshStatus[file.path] = await window.electron.p4CheckFileStatus(file.path);
         }
       }
-      
-      if (successCount > 0) {
-        console.log(`P4: ${successCount} file(s) marked for add`);
+
+      const toCheckout = selectedFiles.filter((f) => freshStatus[f.path]?.inDepot && !freshStatus[f.path]?.checkedOut).map((f) => f.path);
+      const toAdd = selectedFiles.filter((f) => !freshStatus[f.path]?.inDepot);
+
+      let successCount = 0;
+      let failCount = 0;
+      const errors = [];
+
+      if (toCheckout.length > 0) {
+        const results = await window.electron.p4CheckoutFiles({ filePaths: toCheckout, client: selectedP4Client || null });
+        results.forEach((r) => { if (r.success) successCount++; else { failCount++; errors.push(r.error); } });
       }
-      if (failCount > 0) {
-        alert(`P4 Add: ${successCount} added, ${failCount} failed.\nWorkspace: ${selectedP4Client || 'default'}\nMake sure files are under the workspace root folder.`);
+      for (const filePath of toAdd.map((f) => f.path)) {
+        const result = await window.electron.p4AddFile({ filePath, client: selectedP4Client || null });
+        if (result.success) successCount++; else { failCount++; errors.push(result.error); }
       }
-      
-      // Refresh status
-      const statusMap = {};
+
+      if (successCount === 0 && failCount === 0) {
+        alert('Nothing to push — files are already up to date in Perforce.');
+      } else if (failCount > 0) {
+        alert(`Pushed ${successCount} file(s), ${failCount} failed.\n${errors[0] || 'Unknown error'}`);
+      } else {
+        console.log(`P4: pushed ${successCount} file(s) to Perforce`);
+      }
+
+      const refreshedStatus = {};
       for (const file of selectedFiles) {
-        const status = await window.electron.p4CheckFileStatus(file.path);
-        statusMap[file.path] = status;
+        if (window.electron && window.electron.p4CheckFileStatus) {
+          refreshedStatus[file.path] = await window.electron.p4CheckFileStatus(file.path);
+        }
       }
-      setP4Status(statusMap);
+      setP4Status(refreshedStatus);
+      if (onRefreshOpened) await onRefreshOpened();
     } catch (error) {
       alert('P4 error: ' + error.message);
     } finally {
-      setIsCheckingOut(false);
-    }
-  };
-
-  const handleApplyAll = () => {
-    const allMetadata = {
-      ...formData,
-      tags: formData.tags.split(',').map(t => t.trim()).filter(t => t),
-    };
-
-    customFields.forEach(field => {
-      if (field.key.trim() && field.value.trim()) {
-        allMetadata[field.key] = field.value;
-      }
-    });
-
-    Object.keys(allMetadata).forEach(key => {
-      if (!allMetadata[key] || (Array.isArray(allMetadata[key]) && allMetadata[key].length === 0)) {
-        delete allMetadata[key];
-      }
-    });
-
-    if (Object.keys(allMetadata).length > 0) {
-      onMetadataUpdate(allMetadata, mode === 'batch');
-      
-      if (mode === 'batch') {
-        setFormData({
-          title: '',
-          author: '',
-          tags: '',
-          version: '',
-          notes: '',
-        });
-        setCustomFields([]);
-      }
+      setIsPushing(false);
     }
   };
 
@@ -344,146 +211,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
           )}
         </div>
 
-        {/* Perforce Integration */}
-        {p4Available && (
-          <div className="p4-section">
-            {/* P4 Connection Header */}
-            <div 
-              className="p4-header" 
-              onClick={() => setShowP4Details(!showP4Details)}
-            >
-              <div className="p4-title">
-                <GitBranch size={16} />
-                <span>Perforce</span>
-                <span className={`p4-connection-status ${p4Connected ? 'connected' : 'disconnected'}`}>
-                  {p4Connected ? '● Connected' : '○ Disconnected'}
-                </span>
-              </div>
-              <div className="p4-header-actions">
-                <button 
-                  className="p4-refresh-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleRefreshConnection();
-                  }}
-                  disabled={isRefreshing}
-                  title="Refresh connection"
-                >
-                  <RefreshCw size={14} className={isRefreshing ? 'spinning' : ''} />
-                </button>
-                <span className="p4-toggle">{showP4Details ? '▼' : '▶'}</span>
-              </div>
-            </div>
-
-            {/* P4 Connection Details */}
-            {showP4Details && p4Info && (
-              <div className="p4-details">
-                <div className="p4-detail-row">
-                  <User size={14} />
-                  <span className="p4-label">User:</span>
-                  <span className="p4-value">{p4Info.user}</span>
-                </div>
-                <div className="p4-detail-row">
-                  <FolderGit size={14} />
-                  <span className="p4-label">Workspace:</span>
-                  {p4Clients.length > 1 ? (
-                    <select
-                      className="p4-workspace-dropdown"
-                      value={selectedP4Client}
-                      onChange={(e) => setSelectedP4Client(e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {p4Clients.map(c => (
-                        <option key={c.name} value={c.name}>{c.name}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span className="p4-value">{selectedP4Client || p4Info.client}</span>
-                  )}
-                </div>
-                <div className="p4-detail-row">
-                  <Server size={14} />
-                  <span className="p4-label">Server:</span>
-                  <span className="p4-value p4-server">{p4Info.server}</span>
-                </div>
-                
-                {/* Open Full P4 Panel Button */}
-                <button 
-                  className="p4-open-panel-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (onOpenP4Panel) onOpenP4Panel();
-                  }}
-                >
-                  <ExternalLink size={14} />
-                  Open Pending Changes
-                </button>
-              </div>
-            )}
-
-            {/* Checkout Button - only show when files selected */}
-            {selectedFiles.length > 0 && (
-              <>
-                <div className="p4-buttons">
-                  {/* Show Checkout for files in depot */}
-                  {Object.values(p4Status).some(s => s.inDepot && !s.checkedOut) && (
-                    <button 
-                      className="p4-checkout-btn" 
-                      onClick={handleP4Checkout}
-                      disabled={isCheckingOut}
-                    >
-                      <Unlock size={16} />
-                      {isCheckingOut ? 'Working...' : 'Checkout'}
-                    </button>
-                  )}
-                  
-                  {/* Show Add for files not in depot */}
-                  {Object.values(p4Status).some(s => !s.inDepot) && (
-                    <button 
-                      className="p4-add-btn" 
-                      onClick={handleP4Add}
-                      disabled={isCheckingOut}
-                    >
-                      <Plus size={16} />
-                      {isCheckingOut ? 'Working...' : 'Add to Depot'}
-                    </button>
-                  )}
-                  
-                  {/* Show generic checkout if no status yet */}
-                  {Object.keys(p4Status).length === 0 && (
-                    <button 
-                      className="p4-checkout-btn" 
-                      onClick={handleP4Checkout}
-                      disabled={isCheckingOut}
-                    >
-                      <GitBranch size={16} />
-                      {isCheckingOut ? 'Working...' : `Checkout ${selectedFiles.length} file(s)`}
-                    </button>
-                  )}
-                </div>
-                
-                <div className="p4-status">
-                  {Object.values(p4Status).filter(s => s.checkedOut).length > 0 && (
-                    <span className="p4-checked-out">
-                      <Unlock size={14} /> {Object.values(p4Status).filter(s => s.checkedOut).length} checked out
-                    </span>
-                  )}
-                  {Object.values(p4Status).filter(s => s.inDepot && !s.checkedOut).length > 0 && (
-                    <span className="p4-locked">
-                      <Lock size={14} /> {Object.values(p4Status).filter(s => s.inDepot && !s.checkedOut).length} in depot
-                    </span>
-                  )}
-                  {Object.values(p4Status).filter(s => !s.inDepot).length > 0 && (
-                    <span className="p4-not-tracked">
-                      <Plus size={14} /> {Object.values(p4Status).filter(s => !s.inDepot).length} not in depot
-                    </span>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
         <div className="metadata-section">
           <label className="field-label">TITLE</label>
           <div className="field-row">
@@ -493,9 +220,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
               onChange={(e) => handleInputChange('title', e.target.value)}
               placeholder="Enter title..."
             />
-            <button className="apply-btn" onClick={() => handleApplyField('title')}>
-              Apply
-            </button>
           </div>
         </div>
 
@@ -508,9 +232,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
               onChange={(e) => handleInputChange('author', e.target.value)}
               placeholder="Enter author..."
             />
-            <button className="apply-btn" onClick={() => handleApplyField('author')}>
-              Apply
-            </button>
           </div>
         </div>
 
@@ -523,9 +244,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
               onChange={(e) => handleInputChange('tags', e.target.value)}
               placeholder="tag1, tag2, tag3..."
             />
-            <button className="apply-btn" onClick={() => handleApplyField('tags')}>
-              Apply
-            </button>
           </div>
         </div>
 
@@ -538,9 +256,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
               onChange={(e) => handleInputChange('version', e.target.value)}
               placeholder="Enter version..."
             />
-            <button className="apply-btn" onClick={() => handleApplyField('version')}>
-              Apply
-            </button>
           </div>
         </div>
 
@@ -552,9 +267,6 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
             placeholder="Enter notes..."
             rows={4}
           />
-          <button className="apply-btn full-width" onClick={handleApplyNotes}>
-            Apply Notes
-          </button>
         </div>
 
         <div className="custom-fields-section">
@@ -582,10 +294,7 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
                 onChange={(e) => handleCustomFieldChange(index, 'value', e.target.value)}
                 className="custom-value"
               />
-              <button className="apply-btn" onClick={() => handleApplyCustomField(index)}>
-                Apply
-              </button>
-              <button 
+              <button
                 className="remove-btn"
                 onClick={() => handleRemoveCustomField(index)}
               >
@@ -595,8 +304,14 @@ const MetadataPanel = ({ selectedFiles, currentFile, metadata, onMetadataUpdate,
           ))}
         </div>
 
-        <button className="apply-all-btn" onClick={handleApplyAll}>
-          Apply All to {targetCount} file{targetCount !== 1 ? 's' : ''}
+        <button
+          className="push-p4-btn"
+          onClick={handlePushToPerforce}
+          disabled={!p4Available || !p4Connected || selectedFiles.length === 0 || isPushing}
+          title={!p4Connected ? 'Not connected to Perforce' : undefined}
+        >
+          <Upload size={16} />
+          {isPushing ? 'Pushing...' : `Push to Perforce (${targetCount} file${targetCount !== 1 ? 's' : ''})`}
         </button>
       </div>
     </div>

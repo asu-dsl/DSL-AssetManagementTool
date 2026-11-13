@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box } from 'lucide-react';
 import Model3D from './Model3D';
+import { classifyAsset } from '../../shared/assetClassification.js';
 import './AssetViewer.css';
 
 const AssetViewer = ({ file, selectedFiles }) => {
@@ -14,45 +15,30 @@ const AssetViewer = ({ file, selectedFiles }) => {
     }
   }, [file]);
 
-  const loadImageData = async (path) => {
+  const loadImageData = async (filePath) => {
     try {
-      const result = await window.electron.readFile(path);
-      if (result.success) {
-        const ext = path.toLowerCase().split('.').pop();
-        const mimeType = getMimeType(ext);
-        setImageData(`data:${mimeType};base64,${result.data}`);
+      const cls = classifyAsset(filePath);
+      if (cls.nativeMime) {
+        const result = await window.electron.readFile(filePath);
+        if (result.success) setImageData(`data:${cls.nativeMime};base64,${result.data}`);
+      } else if (cls.needsConversion && window.electron.convertImagePreview) {
+        const result = await window.electron.convertImagePreview(filePath, cls.ext);
+        if (result.success) setImageData(`data:${result.mime};base64,${result.data}`);
       }
     } catch (error) {
       console.error('Error loading image:', error);
     }
   };
 
-  const getMimeType = (ext) => {
-    const mimeTypes = {
-      jpg: 'image/jpeg',
-      jpeg: 'image/jpeg',
-      png: 'image/png',
-      gif: 'image/gif',
-      bmp: 'image/bmp',
-      webp: 'image/webp',
-    };
-    return mimeTypes[ext] || 'image/jpeg';
-  };
+  // "Previewable" here means the same thing LibraryGrid's thumbnails use:
+  // natively browser-decodable, or convertible to PNG by the main process.
+  // EXR is excluded until its HDR tone-mapping is designed (see
+  // shared/assetClassification.js).
+  const isImageFile = (fileName) => classifyAsset(fileName).previewable;
 
-  const isImageFile = (fileName) => {
-    const ext = fileName.toLowerCase().split('.').pop();
-    return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
-  };
+  const is3DFile = (fileName) => classifyAsset(fileName).category === 'model';
 
-  const is3DFile = (fileName) => {
-    const ext = fileName.toLowerCase().split('.').pop();
-    return ['obj', 'gltf', 'glb', 'fbx', 'dae', 'stl'].includes(ext);
-  };
-
-  const isMaterialFile = (fileName) => {
-    const ext = fileName.toLowerCase().split('.').pop();
-    return ext === 'mat';
-  };
+  const isMaterialFile = (fileName) => classifyAsset(fileName).category === 'material';
 
   // If multiple files are selected, show grid view
   if (selectedFiles && selectedFiles.length > 1) {
@@ -332,19 +318,13 @@ const ImagePreview = ({ filePath }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        const result = await window.electron.readFile(filePath);
-        if (result.success) {
-          const ext = filePath.toLowerCase().split('.').pop();
-          const mimeTypes = {
-            jpg: 'image/jpeg',
-            jpeg: 'image/jpeg',
-            png: 'image/png',
-            gif: 'image/gif',
-            bmp: 'image/bmp',
-            webp: 'image/webp',
-          };
-          const mimeType = mimeTypes[ext] || 'image/jpeg';
-          setImageData(`data:${mimeType};base64,${result.data}`);
+        const cls = classifyAsset(filePath);
+        if (cls.nativeMime) {
+          const result = await window.electron.readFile(filePath);
+          if (result.success) setImageData(`data:${cls.nativeMime};base64,${result.data}`);
+        } else if (cls.needsConversion && window.electron.convertImagePreview) {
+          const result = await window.electron.convertImagePreview(filePath, cls.ext);
+          if (result.success) setImageData(`data:${result.mime};base64,${result.data}`);
         }
       } catch (error) {
         console.error('Error loading image:', error);
