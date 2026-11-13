@@ -1,3 +1,5 @@
+* text=auto eol=lf
+
 dist-packaged/**/*.exe filter=lfs diff=lfs merge=lfs -text
 dist-packaged/**/*.asar filter=lfs diff=lfs merge=lfs -text
 dist-packaged/**/*.dll filter=lfs diff=lfs merge=lfs -text
