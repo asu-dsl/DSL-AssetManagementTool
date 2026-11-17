@@ -111,6 +111,30 @@
   border-bottom: 1px solid var(--info);
 }
 
+/* Inline action inside the status banner — currently only the "Log in" shortcut shown
+   when the banner reports an invalid Perforce session. Inherits the banner's color so it
+   reads correctly against --bg-danger without hardcoding the danger palette. */
+.p4-status-login-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.p4-status-login-btn:hover {
+  background: var(--surface-2);
+}
+
 .p4-panel-content {
   flex: 1;
   overflow-y: auto;

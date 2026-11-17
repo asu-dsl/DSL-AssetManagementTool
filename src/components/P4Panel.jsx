@@ -3,13 +3,15 @@ import {
   GitBranch, RefreshCw, Upload, RotateCcw, Download,
   FileText, FilePlus, FileEdit, Trash2, ChevronDown, ChevronRight,
   Server, User, FolderGit, AlertCircle, CheckCircle, Clock, X,
-  Eye
+  Eye, LogIn
 } from 'lucide-react';
+import { isP4AuthError } from '../../shared/p4AuthError.js';
 import './P4Panel.css';
 
 const P4Panel = ({
   isOpen, onClose, currentFolder, p4, onRefreshConnection,
   artDepotClient, artDepotRoot, openedFiles, onRefreshOpened,
+  onOpenP4Login, p4SessionEpoch,
 }) => {
   const connected = p4.connected;
   const files = openedFiles || [];
@@ -38,15 +40,22 @@ const P4Panel = ({
     setSelectedFiles(files.map((f) => f.depotFile));
   }, [openedFiles]);
 
+  // Build an error status, tagging it when the message means the Perforce session itself is
+  // invalid. The tag drives both the "Log in" affordance and the auto-clear below, so it has
+  // to travel with the message rather than being re-derived from its text at render time.
+  const errorStatus = (text) => ({ type: 'error', text, authError: isP4AuthError(text) });
+
   // Reflect the shared connection state in the status banner.
   useEffect(() => {
     if (!isOpen) return;
     if (!p4.connected) {
-      setStatusMessage({ type: 'error', text: 'Not connected to Perforce server' });
+      setStatusMessage({ type: 'error', text: 'Not connected to Perforce server', authError: true });
     } else {
-      setStatusMessage((prev) => (prev && prev.text === 'Not connected to Perforce server' ? null : prev));
+      // Clear on the flag, not on an exact text match — an expired-session error raised by a
+      // submit/sync/revert would otherwise stay on screen after the user logs back in.
+      setStatusMessage((prev) => (prev && prev.authError ? null : prev));
     }
-  }, [isOpen, p4.connected]);
+  }, [isOpen, p4.connected, p4SessionEpoch]);
 
   const handleRefresh = async () => {
     setIsLoading(true);
@@ -111,10 +120,10 @@ const P4Panel = ({
         setSubmitDescription('');
         if (onRefreshOpened) await onRefreshOpened();
       } else {
-        setStatusMessage({ type: 'error', text: result.error || 'Submit failed' });
+        setStatusMessage(errorStatus(result.error || 'Submit failed'));
       }
     } catch (error) {
-      setStatusMessage({ type: 'error', text: error.message || 'Submit failed' });
+      setStatusMessage(errorStatus(error.message || 'Submit failed'));
     } finally {
       setIsSubmitting(false);
     }
@@ -144,10 +153,10 @@ const P4Panel = ({
         setStatusMessage({ type: 'success', text: result.message });
         if (onRefreshOpened) await onRefreshOpened();
       } else {
-        setStatusMessage({ type: 'error', text: result.error });
+        setStatusMessage(errorStatus(result.error));
       }
     } catch (error) {
-      setStatusMessage({ type: 'error', text: error.message });
+      setStatusMessage(errorStatus(error.message));
     } finally {
       setIsLoading(false);
     }
@@ -167,10 +176,10 @@ const P4Panel = ({
       if (result.success) {
         setStatusMessage({ type: 'success', text: result.message });
       } else {
-        setStatusMessage({ type: 'error', text: result.error });
+        setStatusMessage(errorStatus(result.error));
       }
     } catch (error) {
-      setStatusMessage({ type: 'error', text: error.message });
+      setStatusMessage(errorStatus(error.message));
     } finally {
       setIsLoading(false);
     }
@@ -230,11 +239,21 @@ const P4Panel = ({
 
         {/* Status Message */}
         {statusMessage && (
-          <div className={`p4-status-message ${statusMessage.type}`}>
+          <div className={`p4-status-message ${statusMessage.type}`} role="status">
             {statusMessage.type === 'error' && <AlertCircle size={16} />}
             {statusMessage.type === 'success' && <CheckCircle size={16} />}
             {statusMessage.type === 'info' && <Clock size={16} />}
             <span>{statusMessage.text}</span>
+            {statusMessage.authError && p4.available && onOpenP4Login && (
+              <button
+                type="button"
+                className="p4-status-login-btn"
+                onClick={onOpenP4Login}
+              >
+                <LogIn size={14} />
+                Log in
+              </button>
+            )}
           </div>
         )}
 

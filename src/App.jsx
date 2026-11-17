@@ -12,6 +12,7 @@ import ProfileCard from './components/ProfileCard';
 import SettingsCard from './components/SettingsCard';
 import { ChevronRight, Download } from 'lucide-react';
 import { classifyAsset, extOf } from '../shared/assetClassification.js';
+import { shouldShowP4LoginModal } from '../shared/p4LoginVisibility.js';
 import './App.css';
 
 class ErrorBoundary extends React.Component {
@@ -159,6 +160,17 @@ function App() {
   const [profile, setProfile] = useState({ displayName: '', key: '' });
   const [p4, setP4] = useState({ available: false, connected: false, user: null, error: null, server: null, client: null, clients: [], root: null });
   const [p4LoginDismissed, setP4LoginDismissed] = useState(false);
+  // Explicitly asked for the login form, as opposed to it auto-appearing on a detected
+  // disconnect. Needed because the session poll only runs every 45s, so p4.connected can
+  // still be a stale `true` right after a ticket expires — without this, a "Log in"
+  // button clicked in that window would open nothing.
+  const [p4LoginRequested, setP4LoginRequested] = useState(false);
+  // Bumped after every successful login. P4Panel keys its banner-clearing effect on
+  // this as well as on p4.connected, because in the stale-connected case (a ticket
+  // that expired between 45s polls) connected is already true and never changes, so
+  // a connected-only dependency would leave the auth error banner stuck on screen
+  // after the user had successfully logged back in.
+  const [p4SessionEpoch, setP4SessionEpoch] = useState(0);
   // Read independently of login state — p4 info omits the server address
   // when not authenticated, which is exactly when the login form needs it.
   const [p4ConfiguredServer, setP4ConfiguredServer] = useState(null);
@@ -818,17 +830,26 @@ function App() {
         artDepotRoot={artDepot.root}
         openedFiles={p4OpenedFiles}
         onRefreshOpened={refreshP4Opened}
+        onOpenP4Login={() => { setP4LoginDismissed(false); setP4LoginRequested(true); }}
+        p4SessionEpoch={p4SessionEpoch}
       />
       <PerforceLoginModal
-        open={p4.available && !p4.connected && !p4LoginDismissed}
+        open={shouldShowP4LoginModal({
+          available: p4.available,
+          connected: p4.connected,
+          loginRequested: p4LoginRequested,
+          dismissed: p4LoginDismissed,
+        })}
         defaultServer={p4ConfiguredServer || p4.server}
         defaultUser={p4.user}
-        onClose={() => setP4LoginDismissed(true)}
+        onClose={() => { setP4LoginRequested(false); setP4LoginDismissed(true); }}
         onSuccess={async () => {
+          setP4LoginRequested(false);
           try {
             const r = await window.electron.p4CheckSession();
             setP4((prev) => ({ ...prev, connected: !!r.connected, error: r.error || null }));
           } catch { /* ignore */ }
+          setP4SessionEpoch((n) => n + 1);
         }}
       />
       <SettingsCard

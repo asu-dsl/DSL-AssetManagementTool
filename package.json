@@ -9,7 +9,9 @@
     "electron:watch": "set NODE_ENV=development && electronmon .",
     "build": "vite build",
     "build:electron": "electron-builder --dir",
-    "package": "electron-packager . AssetMetadataTool --platform=win32 --arch=x64 --out=dist-packaged --overwrite --asar --icon=public/icon.ico"
+    "package": "electron-packager . AssetMetadataTool --platform=win32 --arch=x64 --out=dist-packaged --overwrite --asar --icon=public/icon.ico",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@react-three/drei": "^9.92.0",
@@ -21,12 +23,17 @@
     "three": "^0.160.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.12",
     "@vitejs/plugin-react": "^4.2.0",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.0",
     "electron-packager": "^17.1.2",
     "electronmon": "^2.0.4",
-    "vite": "^5.0.0"
+    "jsdom": "^31.0.1",
+    "vite": "^5.0.0",
+    "vitest": "^2.1.9"
   },
   "electronmon": {
     "patterns": [

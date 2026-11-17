@@ -25,7 +25,9 @@
 .ln-title { font-size: 13px; font-weight: 500; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
 .ln-manage { background: transparent; border: none; color: var(--text-muted); cursor: pointer; display: flex; }
 .ln-manage:hover { color: var(--text); }
-.ln-list { flex: 1; overflow-y: auto; padding: 0 10px 10px; min-height: 0; }
+/* Bottom padding clears the floating scan button, which is absolutely positioned
+   over this list — without it the button covers the last card's expand chevron. */
+.ln-list { flex: 1; overflow-y: auto; padding: 0 10px 44px; min-height: 0; }
 .ln-section { padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
 .ln-section-title { display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); padding: 8px 4px 4px; }
 .ln-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 13px; }
@@ -43,3 +45,49 @@
 .ln-side { flex: 1; border: none; background: transparent; color: var(--text-muted); font-size: 13px; font-weight: 500; padding: 7px 0; border-radius: 8px; cursor: pointer; transition: color 0.15s ease, background 0.15s ease; }
 .ln-side:hover { color: var(--text); }
 .ln-side.active { background: var(--primary); color: var(--primary-fg); }
+
+/* ---------------------------------------------------------------------------
+   Library cards.
+
+   These rules used to live in CollectionsCard.css. LibraryNav reuses the same
+   cc-* markup but never imported that stylesheet — the rules reached it only
+   because any CSS imported anywhere in the bundle is global. CollectionsCard
+   was deleted in 7804892 and took its stylesheet with it, which left every card
+   in this nav unstyled. Restored here, next to the only remaining user.
+   --------------------------------------------------------------------------- */
+
+.cc-wrap { margin-bottom: 8px; position: relative; }
+
+.cc-card { position: relative; height: 60px; border-radius: 12px; overflow: hidden; cursor: pointer; border: 1px solid var(--border); background: var(--surface-2); }
+.cc-card:hover { border-color: var(--border-strong); }
+.cc-card-active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.cc-card-open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+
+/* Cover montage: up to three sampled thumbnails, darkened by a fixed overlay so
+   the label stays legible over arbitrary artwork in either theme. */
+.cc-montage { position: absolute; inset: 0; display: flex; background: var(--surface-2); }
+.cc-tile { flex: 1; overflow: hidden; min-width: 0; }
+.cc-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cc-overlay { position: absolute; inset: 0; background: linear-gradient(rgba(11, 14, 21, 0.5), rgba(11, 14, 21, 0.72)); }
+
+.cc-content { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; height: 100%; padding: 0 10px; min-width: 0; overflow: hidden; }
+.cc-name { flex: 1; min-width: 0; text-align: left; font-size: 15px; font-weight: 500; color: #fff; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.cc-iconbtn { background: rgba(0, 0, 0, 0.4); border: none; color: #fff; display: flex; align-items: center; cursor: pointer; border-radius: 6px; padding: 3px; flex: 0 0 auto; }
+.cc-iconbtn:hover { color: var(--primary); }
+
+.cc-tray { padding: 8px; background: var(--surface-2); border: 1px solid var(--border); border-top: none; border-radius: 0 0 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+
+.cc-fcard { position: relative; height: 40px; border-radius: 9px; overflow: hidden; cursor: pointer; border: 1px solid var(--border); background: var(--surface-1); }
+.cc-fcard:hover { border-color: var(--border-strong); }
+.cc-fcard-active { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.cc-fcontent { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; height: 100%; padding: 0 10px; min-width: 0; overflow: hidden; }
+.cc-fname { flex: 1; min-width: 0; text-align: left; font-size: 12px; font-weight: 500; color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Folder cards nest arbitrarily deep here, which the collections sidebar never
+   did. Repeating the full tray treatment at every level stacked same-colored
+   bordered boxes inside each other; an indent and a guide line read as a tree. */
+.cc-tray .cc-tray { background: transparent; border: none; border-left: 1px solid var(--border); border-radius: 0; margin-left: 10px; padding: 6px 0 0 8px; }
+
+/* Long names fade out rather than showing an ellipsis. */
+.cc-faded { text-overflow: clip; -webkit-mask-image: linear-gradient(to right, #000 72%, transparent 100%); mask-image: linear-gradient(to right, #000 72%, transparent 100%); }

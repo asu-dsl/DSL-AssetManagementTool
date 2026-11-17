@@ -6,7 +6,7 @@ import path from 'path';
 
 const execAsync = promisify(exec);
 
-function buildCommand(args, { user, client, tagged = true } = {}) {
+export function buildCommand(args, { user, client, tagged = true } = {}) {
   let cmd = 'p4';
   if (user) cmd += ` -u "${user}"`;
   if (client) cmd += ` -c "${client}"`;
@@ -19,7 +19,7 @@ function buildCommand(args, { user, client, tagged = true } = {}) {
 // this is what makes parsing unambiguous even when a value itself
 // contains spaces (unlike plain-text p4 output, which has no such
 // guarantee and breaks on real-world filenames).
-function parseTaggedRecords(stdout) {
+export function parseTaggedRecords(stdout) {
   const records = [];
   let current = null;
   for (const line of stdout.split(/\r?\n/)) {
@@ -84,7 +84,7 @@ export async function getConfiguredServer() {
 // usernames. That means "credentials" is the most precise field-level
 // blame this can ever assign for that case; "server" is distinguishable
 // because connection-level failures have genuinely different wording.
-function classifyLoginError(message) {
+export function classifyLoginError(message) {
   if (/connect to server failed|tcp connect to|unknown host|couldn't resolve|class was not found/i.test(message)) {
     return 'server';
   }
